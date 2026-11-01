@@ -1,0 +1,47 @@
+{
+  "id": "dev.kagan.kanban",
+  "name": "Kanban",
+  "version": "0.1.0",
+  "kagan": ">=0.1.0",
+  "entry": "main.js",
+  "icon": "icons/board.svg",
+  "instructions": "Kanban is a ticket board over kagan threads. Read your ticket with kg kanban ticket show before working. Never create tickets unprompted. Move with kg kanban move <stage>; Done archives threads and requires the setting that allows it. Write a ## Handoff as a ticket comment when handing work to a new thread.",
+  "powers": {
+    "run": [{ "program": "gh" }, { "program": "git" }],
+    "areas": ["threads", "database", "process"]
+  },
+  "settings": {
+    "personasDir": { "type": "folder", "title": "Personas folder" },
+    "defaultProgram": {
+      "type": "select",
+      "title": "Program for new threads",
+      "options": ["claude", "codex", "cursor-agent", "opencode", "gemini", "kimi", "amp", "copilot", "agent"],
+      "default": "claude"
+    },
+    "autoLinkRemote": { "type": "boolean", "title": "Auto-link GitHub remote", "default": false },
+    "agentAutoApproveAdds": { "type": "boolean", "title": "Agents add tickets straight onto the board", "default": false },
+    "agentAutoApproveMoves": { "type": "boolean", "title": "Agents move tickets straight away", "default": true },
+    "agentMoveToDone": { "type": "boolean", "title": "Agents can move tickets to Done", "default": false }
+  },
+  "commands": [
+    { "id": "open-board", "title": "Kanban: open board", "key": "cmd-shift-k", "when": "always" },
+    { "id": "open-ticket", "title": "Kanban: open this thread's ticket", "key": "cmd-i", "when": "thread" }
+  ],
+  "ui": {
+    "panels": [
+      { "id": "board", "title": "Board", "view": "BoardPanel", "placement": "center" },
+      { "id": "list", "title": "Ticket list", "view": "SidebarList", "placement": "left", "replaces": "threads" }
+    ]
+  },
+  "cli": [{
+    "name": "kanban",
+    "commands": [
+      { "name": "list", "usage": "list [--project <id>] [--json]" },
+      { "name": "move", "usage": "move <backlog|in-progress|review|done> [ticket] [--json]" },
+      { "name": "ticket", "usage": "ticket <add|new|show|attach|detach|remove|delete|edit|comment|parent|start|handoff|consolidate> ... [--json]" },
+      { "name": "repos", "usage": "repos <list|link|unlink|issues|import> [repo] [number] [--project <id>] [--query <text>] [--label <label>] [--assignee <login>] [--author <login>] [--json]" }
+    ]
+  }],
+  "events": ["thread.created", "thread.started", "thread.idle", "thread.failed", "thread.archived", "thread.unarchived", "thread.deleted"],
+  "skills": ["skills/kanban"]
+}
