@@ -44,7 +44,7 @@ export function sidebarRows(projects, tickets, live, activeProject, expanded, co
     const items = tickets.filter(t => t.projectId === project.id && t.stage !== "done").map(t => {
       const threads = t.links.map(l => byId.get(l.threadId)).filter(Boolean);
       return { id: t.id, ticket: { ...t, threads }, threads, thread: target(threads), depth: 0, place: place[t.stage], needs: needsYou({ ...t, threads }), pinned: threads.some(t => t.pinned), updatedAt: Math.max(t.updatedAt, ...threads.map(t => t.updatedAt)) };
-    }).filter(r => r.ticket.stage !== "backlog" || r.threads.length > 0);
+    });
     const listed = new Map(items.map(r => [r.id, r]));
     const children = new Map();
     for (const item of items) {

@@ -11,7 +11,7 @@
     "areas": ["threads", "database", "process"]
   },
   "settings": {
-    "personasDir": { "type": "folder", "title": "Personas folder" },
+    "personasDir": { "type": "folder", "title": "Personas folder (git pull on open)" },
     "defaultProgram": {
       "type": "select",
       "title": "Program for new threads",
@@ -20,8 +20,8 @@
     },
     "autoLinkRemote": { "type": "boolean", "title": "Auto-link GitHub remote", "default": false },
     "agentAutoApproveAdds": { "type": "boolean", "title": "Agents add tickets straight onto the board", "default": false },
-    "agentAutoApproveMoves": { "type": "boolean", "title": "Agents move tickets straight away", "default": true },
-    "agentMoveToDone": { "type": "boolean", "title": "Agents can move tickets to Done", "default": false }
+    "agentAutoApproveMoves": { "type": "boolean", "title": "Agents move tickets without asking you", "default": true },
+    "agentMoveToDone": { "type": "boolean", "title": "Agents can move to Done (archives threads)", "default": false }
   },
   "commands": [
     { "id": "open-board", "title": "Kanban: open board", "key": "cmd-shift-k", "when": "always" },

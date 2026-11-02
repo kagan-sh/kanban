@@ -10,7 +10,10 @@ import * as github from "./github.js";
 import { listPersonas } from "./personas.js";
 import { STAGES, TITLES, PERSONAS, GLYPHS, attention, needsYou, target, matches, sidebarRows } from "./model.js";
 
-function button(id, label, callback) { return new KgButton(id).label(label).ghost().on_click((cx) => callback(cx)); }
+function clickCx(a, b) { return b ?? a; }
+function button(id, label, callback) {
+  return new KgButton(id).label(label).ghost().on_click((a, b) => callback(clickCx(a, b)));
+}
 function muted(message, cx) { return div().text_color(cx.theme().colors.muted_foreground).child(message); }
 function select(id, rows, label, callback) {
   return new Select(id, () => rows, row => div().child(String(/** @type {{label: string}} */ (row).label)), callback).placeholder(label);
@@ -83,12 +86,9 @@ export class BoardPanel extends WatchedView {
     this.sourceIds = new Set();
     super.init(props, cx);
     this.contextTask = cx.spawn(async cx => {
-      const saved = await store.kvGet("board");
-      if (saved) {
-        const state = JSON.parse(String(saved));
-        this.projectId ??= state.projectId;
-        this.looseOpen = Boolean(state.looseOpen);
-      }
+      const state = await store.kvJson("board", {});
+      this.projectId ??= state.projectId;
+      this.looseOpen = Boolean(state.looseOpen);
       this.applyContext(host.context());
       await this.refresh();
       this.consumeMove(cx);
@@ -135,13 +135,25 @@ export class BoardPanel extends WatchedView {
   }
   move(ticket, stage, cx) {
     if (stage === "done" && ticket.threads.length) {
-      window.open_dialog(() => v_flex().gap_3().child(`Move #${ticket.number} to Done?`).child("This archives every live thread on the ticket.").child(h_flex().gap_2()
-        .child(button(`cancel-done:${ticket.id}`, "Cancel", () => window.close_dialog()))
-        .child(button(`confirm-done:${ticket.id}`, "Move to Done", cx => { window.close_dialog(); this.act(cx, () => store.moveTicket(ticket.id, stage)); }))));
+      window.open_dialog(() => v_flex().gap_3()
+        .child(`Move #${ticket.number} to Done?`)
+        .child("This archives every live thread on the ticket.")
+        .child(h_flex().gap_2()
+          .child(button(`cancel-done:${ticket.id}`, "Cancel", () => window.close_dialog()))
+          .child(button(`confirm-done:${ticket.id}`, "Move to Done and archive threads", cx => { window.close_dialog(); this.act(cx, () => store.moveTicket(ticket.id, stage)); }))));
     } else if (["in-progress", "review"].includes(stage) && ticket.threads.length) {
-      this.pendingMove = { id: ticket.id, stage };
-      this.ticketId = ticket.id;
-      this.act(cx, async () => { await this.prepare("handoff", ticket); this.persona = this.personas.includes(PERSONAS[stage]) ? PERSONAS[stage] : ""; });
+      window.open_dialog(() => v_flex().gap_3()
+        .child(`Move #${ticket.number} to ${TITLES[stage]}?`)
+        .child("Move keeps the current threads. Hand off starts a new thread and archives the ones you pick.")
+        .child(h_flex().gap_2()
+          .child(button(`cancel-move:${ticket.id}`, "Cancel", () => window.close_dialog()))
+          .child(button(`handoff-move:${ticket.id}`, "Hand off…", cx => {
+            window.close_dialog();
+            this.pendingMove = { id: ticket.id, stage };
+            this.ticketId = ticket.id;
+            this.act(cx, async () => { await this.prepare("handoff", ticket); this.persona = this.personas.includes(PERSONAS[stage]) ? PERSONAS[stage] : ""; });
+          }))
+          .child(button(`just-move:${ticket.id}`, "Move without starting a thread", cx => { window.close_dialog(); this.act(cx, () => store.moveTicket(ticket.id, stage)); }))));
     } else this.act(cx, () => store.moveTicket(ticket.id, stage));
   }
   menu(ticket, cx) {
@@ -163,30 +175,32 @@ export class BoardPanel extends WatchedView {
     if (!this.projectId) return root.child(muted("Open or create a project to use the board", cx));
     if (this.ticketId && this.ticket) return root.child(this.renderTicket(cx));
     const projectRows = this.projects.map(p => ({ id: p.id, label: p.name }));
-    root.child(h_flex().gap_2().px_4().py_2()
-      .child(select("board-project", projectRows, this.projects.find(p => p.id === this.projectId)?.name ?? "Project", (id, cx) => this.act(cx, async () => { this.projectId = id; this.form = null; await this.remember(); })))
-      .child(new Input(this.search).aria_label("Search tickets").flex_1().on_change((_, cx) => cx.notify()))
-      .child(button("new-ticket", "New ticket…", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); }))
-      .child(button("repos", "Repos…", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); })))
-      .child(button("loose-toggle", `${this.data.loose.filter(t => t.projectId === this.projectId).length} loose`, cx => this.act(cx, async () => { this.looseOpen = !this.looseOpen; await this.remember(); }))));
     const own = this.data.tickets.filter(t => (t.projectId === this.projectId || this.shown.has(t.projectId)) && matches(t, this.search.value()));
     const need = own.filter(needsYou);
-    root.child(h_flex().gap_2().px_4().child(button("next-needs", `${need.length} need you`, cx => { if (need.length) this.openTicket(need[0].id, cx); }))
-      .child(new DropdownMenu("show-projects", "Show projects").map(menu => {
+    const looseCount = this.data.loose.filter(t => t.projectId === this.projectId).length;
+    root.child(h_flex().gap_2().px_4().py_2().flex_wrap()
+      .child(select("board-project", projectRows, this.projects.find(p => p.id === this.projectId)?.name ?? "Project", (id, cx) => this.act(cx, async () => { this.projectId = id; this.form = null; await this.remember(); })))
+      .child(new Input(this.search).aria_label("Search tickets").flex_1().min_w("10rem").on_change((_, cx) => cx.notify()))
+      .child(button("new-ticket", "Create ticket", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); }))
+      .child(button("repos", "Link GitHub repos", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); })))
+      .child(button("loose-toggle", looseCount ? `Show ${looseCount} threads with no ticket` : "No threads without a ticket", cx => this.act(cx, async () => { this.looseOpen = !this.looseOpen; await this.remember(); })).disabled(looseCount === 0)));
+    root.child(h_flex().gap_2().px_4().flex_wrap()
+      .child(button("next-needs", need.length ? `Open next ticket that needs you (${need.length})` : "No tickets need you", cx => { if (need.length) this.openTicket(need[0].id, cx); }).disabled(need.length === 0))
+      .child(new DropdownMenu("show-projects", "Show other projects").map(menu => {
         for (const p of this.projects.filter(p => p.id !== this.projectId)) menu.item(`${this.shown.has(p.id) ? "Hide" : "Show"} ${p.name}`, cx => { this.shown.has(p.id) ? this.shown.delete(p.id) : this.shown.add(p.id); cx.notify(); });
         return menu;
       })));
     if (this.form) root.child(this.renderForm(cx));
     if (this.looseOpen) root.child(new Scroll(this.scroll).max_h("10rem").child(v_flex().px_4().children(this.data.loose.filter(t => t.projectId === this.projectId).map(t => h_flex().gap_2()
       .child(button(`loose-open:${t.id}`, t.title, cx => this.act(cx, () => host.openThread(t.id))))
-      .child(button(`loose-new:${t.id}`, "New ticket", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id }))))))));
-    root.child(h_flex().items_stretch().flex_1().min_h_0().min_w_0().gap_2().px_3().pb_3().children(STAGES.map((stage, ix) => {
+      .child(button(`loose-new:${t.id}`, "Create ticket from thread", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id }))))))));
+    root.child(h_flex().items_stretch().flex_1().min_h_0().min_w_0().gap_2().px_3().pb_3().overflow_x_scroll().children(STAGES.map((stage, ix) => {
       const tickets = own.filter(t => t.stage === stage).sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || b.updatedAt - a.updatedAt);
       const visible = stage === "done" ? tickets.slice(0, this.doneLimit) : tickets;
       const heading = h_flex().gap_2().px_3().pt_3().pb_1().items_center()
         .child(div().child(TITLES[stage]));
       if (tickets.length) heading.child(div().text_color(colors.muted_foreground).child(String(tickets.length)));
-      const column = v_flex().flex_1().min_w("16rem").min_h_0().rounded(cx.theme().radius.md).bg(colors.surface).child(heading);
+      const column = v_flex().flex_1().min_w("12rem").max_w("24rem").min_h_0().rounded(cx.theme().radius.md).bg(colors.surface).child(heading);
       const cards = visible.map(t => {
         const parent = t.parentId ? this.data.tickets.find(p => p.id === t.parentId) : null;
         const children = this.data.tickets.filter(c => c.parentId === t.id);
@@ -194,11 +208,15 @@ export class BoardPanel extends WatchedView {
         if (t.proposed) card.border_dashed();
         card.child(h_flex().gap_2().items_start()
           .child(div().text_color(colors.muted_foreground).child(`#${t.number}`))
-          .child(new KgButton(`card:${t.id}`).label(t.title).ghost().flex_1().min_w_0().on_click((cx) => this.openTicket(t.id, cx)))
+          .child(new KgButton(`card:${t.id}`).label(t.title).ghost().flex_1().min_w_0().on_click((a, b) => this.openTicket(t.id, clickCx(a, b))))
           .child(this.menu(t, cx)));
+        if (!t.proposed) {
+          const moves = STAGES.filter(s => s !== t.stage).map(s => button(`move:${t.id}:${s}`, `Move to ${TITLES[s]}`, cx => this.move(t, s, cx)));
+          card.child(h_flex().gap_1().flex_wrap().children(moves));
+        }
         if (t.proposed) card.child(h_flex().gap_2()
-          .child(button(`accept:${t.id}`, "Accept", cx => this.act(cx, () => store.acceptTicket(t.id))))
-          .child(button(`dismiss:${t.id}`, "Dismiss", cx => this.act(cx, () => store.dismissTicket(t.id)))));
+          .child(button(`accept:${t.id}`, "Accept ticket", cx => this.act(cx, () => store.acceptTicket(t.id))))
+          .child(button(`dismiss:${t.id}`, "Dismiss proposal", cx => this.act(cx, () => store.dismissTicket(t.id)))));
         if (needsYou(t) && !t.proposed) card.child(muted("Needs you", cx));
         if (parent) card.child(muted(`Sub-ticket of #${parent.number}`, cx));
         if (children.length) card.child(muted(`${children.filter(c => c.stage === "done").length} of ${children.length} sub-tickets done`, cx));
@@ -207,7 +225,11 @@ export class BoardPanel extends WatchedView {
         if (thread) card.child(h_flex().gap_2().child(new ThreadStatus(thread.id)).child(button(`card-thread:${thread.id}`, thread.title, cx => this.act(cx, () => host.openThread(thread.id)))));
         return card;
       });
-      column.child(new Scroll(this.columns[ix]).flex_1().min_h_0().child(v_flex().gap_2().px_2().py_2().children(cards)));
+      const body = v_flex().gap_2().px_2().py_2().children(cards);
+      if (stage === "backlog" && !tickets.length && !this.search.value().trim()) {
+        body.child(button("empty-create", "Create your first ticket", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); }));
+      }
+      column.child(new Scroll(this.columns[ix]).flex_1().min_h_0().child(body));
       if (stage === "done" && visible.length < tickets.length) column.child(button("more-done", `Show ${tickets.length - visible.length} more`, cx => { this.doneLimit += 20; cx.notify(); }));
       return column;
     })));
@@ -232,15 +254,15 @@ export class BoardPanel extends WatchedView {
       const project = this.projects.find(p => p.id === thread.projectId);
       const menu = new DropdownMenu(`thread-menu:${thread.id}`, "Thread actions")
         .item(thread.pinned ? "Unpin" : "Pin", cx => this.act(cx, () => threads.setPinned(thread.id, !thread.pinned)))
-        .item("Detach", cx => this.act(cx, () => store.detach(thread.id)))
-        .item("Archive", cx => this.act(cx, async () => { await threads.archive(thread.id); store.touch(); }));
+        .item("Remove thread from ticket", cx => this.act(cx, () => store.detach(thread.id)))
+        .item("Archive thread", cx => this.act(cx, async () => { await threads.archive(thread.id); store.touch(); }));
       body.child(h_flex().gap_2().child(new ThreadStatus(thread.id)).child(button(`ticket-thread:${thread.id}`, `${thread.title}${thread.projectId !== t.projectId ? ` · ${project?.name ?? thread.projectId}` : ""}`, cx => this.act(cx, () => host.openThread(thread.id)))).child(menu));
     }
     if (!t.proposed && t.stage !== "done") {
       body.child(h_flex().gap_2().child(button("start-thread", "Start thread…", cx => this.act(cx, () => this.prepare("start", t))))
-        .child(button("attach-thread", "Attach loose thread…", cx => { this.form = "attach"; cx.notify(); })));
-      if (t.threads.length) body.child(h_flex().gap_2().child(button("handoff-thread", "Hand off…", cx => this.act(cx, () => this.prepare("handoff", t))))
-        .child(button("consolidate-threads", "Consolidate…", cx => this.act(cx, () => this.prepare("consolidate", t)))));
+        .child(button("attach-thread", "Attach a thread with no ticket", cx => { this.form = "attach"; cx.notify(); })));
+      if (t.threads.length) body.child(h_flex().gap_2().child(button("handoff-thread", "Start new thread from this one", cx => this.act(cx, () => this.prepare("handoff", t))))
+        .child(button("consolidate-threads", "Merge threads into one new thread", cx => this.act(cx, () => this.prepare("consolidate", t)))));
       body.child(select("parent-ticket", [{ id: "none", label: "No parent" }, ...this.data.tickets.filter(p => p.id !== t.id && p.projectId === t.projectId && !p.proposed).map(p => ({ id: p.id, label: `#${p.number} ${p.title}` }))], t.parentId ? `Parent #${this.data.tickets.find(p => p.id === t.parentId)?.number}` : "Set parent…", (id, cx) => this.act(cx, () => store.setParent(t.id, id === "none" ? null : id))));
     }
     for (const child of t.subTickets) body.child(button(`sub:${child.id}`, `↳ #${child.number} ${child.title} · ${TITLES[child.stage]}`, cx => this.openTicket(child.id, cx)));
@@ -259,7 +281,7 @@ export class BoardPanel extends WatchedView {
     body.child(button("delete-ticket", "Delete ticket…", cx => {
       window.open_dialog(() => v_flex().gap_3().child(`Delete #${t.number} “${t.title}”?`).child("Its threads will be archived. The ticket and comments will be deleted.")
         .child(h_flex().gap_2().child(button("cancel-delete", "Cancel", () => window.close_dialog()))
-          .child(new KgButton("confirm-delete").danger().label("Delete").on_click((cx) => { window.close_dialog(); this.act(cx, async () => { await store.deleteTicket(t.id); this.ticketId = null; }); }))));
+          .child(new KgButton("confirm-delete").danger().label("Delete ticket").on_click((a, b) => { window.close_dialog(); this.act(clickCx(a, b), async () => { await store.deleteTicket(t.id); this.ticketId = null; }); }))));
     }));
     return v_flex().size_full().min_h_0().child(head).child(new Scroll(this.scroll).flex_1().min_h_0().child(body));
   }
@@ -267,8 +289,9 @@ export class BoardPanel extends WatchedView {
     const form = v_flex().p_4().gap_2().border_1().border_color(cx.theme().colors.border);
     const cancel = button("cancel-form", "Cancel", cx => { this.form = null; this.pendingMove = null; cx.notify(); });
     if (this.form === "new" || this.form === "edit") {
-      form.child(div().id("ticket-title").child(new Input(this.title).aria_label("Ticket title"))).child(new Textarea(this.description).aria_label("Description"));
-      form.child(h_flex().gap_2().child(cancel).child(new KgButton("save-ticket").primary().label(this.form === "new" ? "Create" : "Save").disabled(this.busy).on_click((cx) => this.act(cx, async () => {
+      form.child(div().id("ticket-title").child(new Input(this.title).aria_label("Ticket title").on_change((_, cx) => cx.notify()))).child(new Textarea(this.description).aria_label("Description"));
+      const titleOk = this.title.value().trim().length > 0 && this.title.value().trim().length <= 200;
+      form.child(h_flex().gap_2().child(cancel).child(new KgButton("save-ticket").primary().label(this.form === "new" ? "Create ticket" : "Save ticket").disabled(this.busy || !titleOk).on_click((a, b) => this.act(clickCx(a, b), async () => {
         if (this.form === "new") await store.createTicket({ projectId: this.projectId, title: this.title.value(), description: this.description.value() });
         else await store.editTicket(this.ticketId, { title: this.title.value(), description: this.description.value() });
         this.form = null;
@@ -283,8 +306,9 @@ export class BoardPanel extends WatchedView {
         cx.notify();
       }));
       const actions = h_flex().gap_2().child(cancel);
-      if (this.pendingMove) actions.child(button("just-move", "Just move", cx => this.act(cx, async () => { await store.moveTicket(this.pendingMove.id, this.pendingMove.stage); this.pendingMove = null; this.form = null; })));
-      actions.child(new KgButton("submit-thread").primary().label(this.form === "start" ? "Start" : "Hand off").disabled(this.busy).on_click((cx) => this.act(cx, async () => {
+      if (this.pendingMove) actions.child(button("just-move", "Move without starting a thread", cx => this.act(cx, async () => { await store.moveTicket(this.pendingMove.id, this.pendingMove.stage); this.pendingMove = null; this.form = null; })));
+      const canSubmit = this.form === "start" || this.sourceIds.size > 0;
+      actions.child(new KgButton("submit-thread").primary().label(this.form === "start" ? "Start thread" : this.form === "consolidate" ? "Merge into new thread" : "Start new thread from sources").disabled(this.busy || !canSubmit).on_click((a, b) => this.act(clickCx(a, b), async () => {
         const options = { persona: this.persona || null, prompt: this.prompt.value() };
         if (this.form === "start") await handoff.startThread(this.ticketId, options);
         else {
@@ -295,8 +319,9 @@ export class BoardPanel extends WatchedView {
       })));
       form.child(actions);
     } else if (this.form === "attach") {
-      for (const thread of this.data.loose) form.child(button(`attach:${thread.id}`, thread.title, cx => this.act(cx, async () => { await store.attach(this.ticketId, thread.id); this.form = null; })));
-      if (!this.data.loose.length) form.child(muted("No loose threads", cx));
+      const loose = this.data.loose.filter(thread => thread.projectId === this.ticket?.projectId);
+      for (const thread of loose) form.child(button(`attach:${thread.id}`, thread.title, cx => this.act(cx, async () => { await store.attach(this.ticketId, thread.id); this.form = null; })));
+      if (!loose.length) form.child(muted("No threads without a ticket in this project", cx));
       form.child(cancel);
     } else if (this.form === "repos") {
       for (const repo of this.repos) form.child(h_flex().gap_2().child(repo).child(button(`unlink:${repo}`, "Unlink", cx => this.act(cx, () => store.unlinkRepo(this.projectId, repo)))));
@@ -324,8 +349,8 @@ export class SidebarList extends WatchedView {
     super.init(props, cx);
     this.context = followContext(cx);
     this.preferences = cx.spawn(async cx => {
-      const saved = await store.kvGet("sidebar");
-      if (saved) this.collapsed = new Set(JSON.parse(String(saved)));
+      const saved = await store.kvJson("sidebar", []);
+      this.collapsed = new Set(saved);
       cx.notify();
     });
   }
@@ -351,17 +376,17 @@ export class SidebarList extends WatchedView {
       .child(this.error ? muted(this.error, cx) : "")
       .child(new Scroll(this.scroll).flex_1().min_h_0().child(v_flex().id("kanban-sidebar").children(rows.map(row => {
         if (row.project) return h_flex().w_full().h_8().px_2().gap_2()
-          .child(button(`collapse:${row.id}`, this.collapsed.has(row.id) ? ">" : "v", cx => this.act(cx, async () => { this.collapsed.has(row.id) ? this.collapsed.delete(row.id) : this.collapsed.add(row.id); await store.kvSet("sidebar", JSON.stringify([...this.collapsed])); })))
+          .child(button(`collapse:${row.id}`, this.collapsed.has(row.id) ? "Expand project" : "Collapse project", cx => this.act(cx, async () => { this.collapsed.has(row.id) ? this.collapsed.delete(row.id) : this.collapsed.add(row.id); await store.kvSet("sidebar", JSON.stringify([...this.collapsed])); })))
           .child(button(`project:${row.id}`, `${row.project.name}${row.needs ? ` · ${row.needs} need you` : ""}`, cx => this.open(row, cx)).flex_1());
         const title = row.ticket && !row.id.startsWith("child:") ? `${GLYPHS[row.ticket.stage]} #${row.ticket.number} ${row.ticket.title}` : `· ${row.thread.title}${row.thread.projectId !== row.ticket?.projectId && row.ticket ? ` · ${this.projects.find(p => p.id === row.thread.projectId)?.name ?? ""}` : ""}`;
         const line = h_flex().w_full().h_8().gap_1().px_2().pl(`${(row.depth + 1) * 0.75}rem`).bg(row.id === this.selected || row.thread?.id === host.context().threadId ? colors.selection : colors.surface)
           .child(div().flex_1().min_w_0().overflow_hidden().child(button(`row:${row.id}`, title, cx => { this.selected = row.id; this.open(row, cx); })));
         if (row.thread) line.child(new ThreadStatus(row.thread.id));
         if (row.ticket?.proposed) line.child(muted("Proposed", cx));
-        if (row.threads?.length > 1) line.child(button(`expand:${row.id}`, `${row.threads.length}`, cx => { this.expanded.has(row.id) ? this.expanded.delete(row.id) : this.expanded.add(row.id); cx.notify(); }));
-        if (row.ticket && !row.ticket.proposed) line.child(button(`board:${row.id}`, "Board", cx => this.act(cx, () => boardLink(row.ticket.projectId, row.ticket.id))));
-        if (row.thread) line.child(button(`archive:${row.id}`, "Arch", cx => this.act(cx, async () => { await threads.archive(row.thread.id); store.touch(); })));
-        if (row.thread && !row.ticket) line.child(button(`newtkt:${row.id}`, "Ticket", cx => this.act(cx, () => store.createTicket({ projectId: row.thread.projectId, title: row.thread.title, threadId: row.thread.id }))));
+        if (row.threads?.length > 1) line.child(button(`expand:${row.id}`, `Show ${row.threads.length} threads`, cx => { this.expanded.has(row.id) ? this.expanded.delete(row.id) : this.expanded.add(row.id); cx.notify(); }));
+        if (row.ticket && !row.ticket.proposed) line.child(button(`board:${row.id}`, "Open on board", cx => this.act(cx, () => boardLink(row.ticket.projectId, row.ticket.id))));
+        if (row.thread) line.child(button(`archive:${row.id}`, "Archive thread", cx => this.act(cx, async () => { await threads.archive(row.thread.id); store.touch(); })));
+        if (row.thread && !row.ticket) line.child(button(`newtkt:${row.id}`, "Create ticket", cx => this.act(cx, () => store.createTicket({ projectId: row.thread.projectId, title: row.thread.title, threadId: row.thread.id }))));
         return line;
       }))));
   }

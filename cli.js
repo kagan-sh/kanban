@@ -64,11 +64,17 @@ export async function execute(job) {
     return store.createTicket({ projectId: projectId ?? t.projectId, title: t.title, threadId: t.id, stage: flags.stage });
   }
   if (action === "detach") return store.detach(thread(ref));
-  if (action === "remove") return threads.archive(thread(ref));
+  if (action === "remove") {
+    if (job.threadId && settings().agentAutoApproveMoves === false) throw new Error("Archiving a thread from the agent CLI needs Agents move tickets without asking you");
+    return threads.archive(thread(ref));
+  }
   const t = await store.resolveTicket(ref, context);
   if (action === "show") return store.detail(t.id);
   if (action === "attach") return store.attach(t.id, thread(rest[0]));
-  if (action === "delete") return store.deleteTicket(t.id);
+  if (action === "delete") {
+    if (job.threadId && settings().agentMoveToDone !== true) throw new Error("Deleting a ticket from the agent CLI needs Agents can move to Done (archives threads)");
+    return store.deleteTicket(t.id);
+  }
   if (action === "edit") {
     if (flags.title === undefined && flags.desc === undefined) throw new Error("Supply --title or --desc");
     return store.editTicket(t.id, { title: flags.title, description: flags.desc });

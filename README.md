@@ -17,9 +17,11 @@ kg plugin check .
 kg plugin install .
 ```
 
-Approve the powers screen. The plugin reads threads, stores its own database, runs `gh` for read-only issue access, and runs `git` for worktree checks and optional personas pull. Set **Program for new threads** and optionally **Personas folder** in plugin settings.
+Approve the powers screen. The plugin reads threads, stores tickets in its own SQLite file under `~/.kagan/plugins/dev.kagan.kanban/`, and can run `gh` and `git` with your normal credentials (issue import is copy-only; `gh` itself is a full CLI). Set **Program for new threads** and optionally **Personas folder** (opening the board may `git pull --ff-only` that folder).
 
-Open **Board** (Command-Shift-K). Pick **Ticket list** under Settings → Appearance → Sidebar to navigate by ticket. Command-I opens the current thread's ticket.
+**First success:** click **Board** on the rail (or Command-Shift-K) → **Create ticket** → type a title → **Create ticket**. You should see it in Backlog.
+
+Optional: Settings → Appearance → Sidebar → pick this plugin’s ticket list. Command-I opens the current thread’s ticket.
 
 ## Work on tickets
 

@@ -21,6 +21,8 @@ export function serial(fn) {
 
 export function ready() {
   return migrated ??= migrate([
+    // Fresh installs only. An older incompatible SQLite under
+    // ~/.kagan/plugins/dev.kagan.kanban/data/ must be moved aside first.
     `CREATE TABLE ticket (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('backlog','in-progress','review','done')), description TEXT NOT NULL DEFAULT '', proposed INTEGER NOT NULL DEFAULT 0, issue_repo TEXT, issue_number INTEGER, issue_url TEXT, environment_id TEXT, pending_stage TEXT, parent_id TEXT REFERENCES ticket(id) ON DELETE SET NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(project_id, number))`,
     `CREATE UNIQUE INDEX ticket_issue ON ticket(project_id, issue_repo COLLATE NOCASE, issue_number) WHERE issue_repo IS NOT NULL`,
     `CREATE TABLE ticket_thread (thread_id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, persona TEXT, archived_by_done INTEGER NOT NULL DEFAULT 0)`,
@@ -41,7 +43,14 @@ export function touch() {
 
 export function currentGeneration() { return generation; }
 export function nextChange(since) {
-  return since !== generation ? Promise.resolve(generation) : new Promise(resolve => waiters.push(resolve));
+  if (since !== generation) return Promise.resolve(generation);
+  return new Promise((resolve) => {
+    if (since !== generation) {
+      resolve(generation);
+      return;
+    }
+    waiters.push(resolve);
+  });
 }
 
 export async function kvGet(key) {
@@ -51,6 +60,16 @@ export async function kvGet(key) {
 export async function kvSet(key, value) {
   await ready();
   await run("INSERT INTO kv VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+}
+export async function kvJson(key, fallback) {
+  try {
+    const raw = await kvGet(key);
+    if (raw == null) return fallback;
+    return JSON.parse(String(raw));
+  } catch {
+    await kvSet(key, JSON.stringify(fallback));
+    return fallback;
+  }
 }
 
 function ticket(row) {
@@ -129,7 +148,10 @@ export async function createTicketInner(input) {
   if (input.threadId) await threads.get(input.threadId);
   const id = newId("tkt");
   const now = Date.now();
-  const statements = [{ sql: `INSERT INTO ticket(id, project_id, number, title, stage, description, proposed, issue_repo, issue_number, issue_url, created_at, updated_at) SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM ticket WHERE project_id = ?`, params: [id, input.projectId, title, wanted, input.description ?? "", input.proposed ? 1 : 0, input.issue?.repo ?? null, input.issue?.number ?? null, input.issue?.url ?? null, now, now, input.projectId] }];
+  const description = input.description == null || input.description === ""
+    ? ""
+    : text(String(input.description), "Description", 20_000);
+  const statements = [{ sql: `INSERT INTO ticket(id, project_id, number, title, stage, description, proposed, issue_repo, issue_number, issue_url, created_at, updated_at) SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM ticket WHERE project_id = ?`, params: [id, input.projectId, title, wanted, description, input.proposed ? 1 : 0, input.issue?.repo ?? null, input.issue?.number ?? null, input.issue?.url ?? null, now, now, input.projectId] }];
   if (input.threadId) statements.push({ sql: "INSERT INTO ticket_thread(thread_id, ticket_id, persona) VALUES (?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET ticket_id = excluded.ticket_id, persona = excluded.persona, archived_by_done = 0", params: [input.threadId, id, input.persona ?? null] });
   await transaction(statements);
   touch();
@@ -140,7 +162,8 @@ export function attach(id, threadId, persona = null) { return serial(() => attac
 export async function attachInner(id, threadId, persona = null) {
   const t = await ticketRow(id);
   if (t.proposed || t.stage === "done") throw new Error("Accept or reopen the ticket before attaching a thread");
-  await threads.get(threadId);
+  const thread = await threads.get(threadId);
+  if (thread.projectId !== t.projectId) throw new Error("Attach a thread from the same project as the ticket");
   await run("INSERT INTO ticket_thread(thread_id, ticket_id, persona) VALUES (?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET ticket_id = excluded.ticket_id, persona = excluded.persona, archived_by_done = 0", [threadId, id, persona]);
   touch();
 }
@@ -151,7 +174,10 @@ export function detach(threadId) {
 export function editTicket(id, fields) {
   return serial(async () => {
     const t = await ticketRow(id);
-    await run("UPDATE ticket SET title = ?, description = ?, updated_at = ? WHERE id = ?", [text(fields.title ?? t.title, "Title"), fields.description ?? t.description, Date.now(), id]);
+    const description = fields.description === undefined
+      ? t.description
+      : (fields.description === "" ? "" : text(String(fields.description), "Description", 20_000));
+    await run("UPDATE ticket SET title = ?, description = ?, updated_at = ? WHERE id = ?", [text(fields.title ?? t.title, "Title"), description, Date.now(), id]);
     touch();
   });
 }
