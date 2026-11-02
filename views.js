@@ -8,7 +8,7 @@ import * as store from "./store.js";
 import * as handoff from "./handoff.js";
 import * as github from "./github.js";
 import { listPersonas } from "./personas.js";
-import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, attention, needsYou, target, matches, sidebarRows } from "./model.js";
+import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, needsYou, target, matches, sidebarRows, AGE_WARN_DAYS, isGated, startProblem, daysInStage, sortColumn, openBlockers, canBlock, subTicketLine, threadStatusLine, criteriaLine, rankOrder, looksLikeUserStory, USER_STORY_WARNING, KINDS } from "./model.js";
 
 function clickCx(a, b) { return b ?? a; }
 function button(id, label, callback) {
@@ -55,11 +55,19 @@ class WatchedView extends View {
     if (this.busy) return;
     this.busy = true;
     this.error = "";
+    this.note = "";
     cx.notify();
     cx.spawn(async cx => {
       try { await fn(); await this.refresh(); }
       catch (error) { this.error = String(error); }
-      finally { this.busy = false; cx.notify(); }
+      finally {
+        this.busy = false;
+        cx.notify();
+        if (this.refocusComposer) {
+          this.refocusComposer = false;
+          try { this.composerFocus.focus(); } catch { /* The field closes when Escape won the race. */ }
+        }
+      }
     });
   }
   render(cx) { return muted(this.error, cx); }
@@ -71,7 +79,22 @@ export class BoardPanel extends WatchedView {
     this.ticketId = null;
     this.ticket = null;
     this.shown = new Set();
-    this.search = InputState("Search tickets and threads");
+    this.search = InputState("Search");
+    this.formFocus = cx.focus_handle();
+    this.boardFocus = cx.focus_handle();
+    this.searchFocus = cx.focus_handle();
+    this.composerFocus = cx.focus_handle();
+    this.jumpFocus = cx.focus_handle();
+    this.composer = InputState("Ticket title, then Enter");
+    this.composerOpen = false;
+    this.warnDays = InputState("14");
+    this.wipLimit = InputState("Off");
+    this.ruleMap = new Map();
+    this.note = "";
+    this.fields = 0;
+    this.refocusComposer = false;
+    this.jumpIndex = -1;
+    this.jumpId = null;
     this.title = InputState("Ticket title");
     this.description = TextareaState();
     this.comment = TextareaState();
@@ -89,6 +112,12 @@ export class BoardPanel extends WatchedView {
     this.columns = STAGES.map(() => ScrollbarHandle());
     this.pendingMove = null;
     this.sourceIds = new Set();
+    const typing = (state) => {
+      state.on("focus", () => { this.fields += 1; });
+      state.on("blur", () => { this.fields = Math.max(0, this.fields - 1); });
+    };
+    for (const state of [this.search, this.composer, this.title, this.repo, this.issueQuery, this.warnDays, this.wipLimit, this.description, this.comment, this.prompt]) typing(state);
+    this.composer.on("submit", (_event, cx) => this.submitComposer(cx));
     super.init(props, cx);
     this.contextTask = cx.spawn(async cx => {
       const state = await store.kvJson("board", {});
@@ -124,6 +153,104 @@ export class BoardPanel extends WatchedView {
       if (!this.ticket) this.ticketId = null;
     }
     if (this.projectId) this.repos = await store.listRepos(this.projectId);
+    const ids = [...new Set([this.projectId, ...this.shown, ...this.data.tickets.map(t => t.projectId)].filter(Boolean))];
+    this.ruleMap = new Map();
+    for (const id of ids) this.ruleMap.set(id, await store.boardRules(id));
+  }
+  onBoard(ticket) {
+    return ticket.projectId === this.projectId || this.shown.has(ticket.projectId);
+  }
+  ticketsIn(stage, filtered = true) {
+    const own = this.data.tickets.filter(t => this.onBoard(t) && t.stage === stage && (!filtered || matches(t, this.search.value())));
+    return sortColumn(own, stage, this.projectId, [...this.shown]);
+  }
+  waitingTickets() {
+    return STAGES.flatMap(stage => this.ticketsIn(stage, false).filter(needsYou));
+  }
+  jumpToNext(cx) {
+    const waiting = this.waitingTickets();
+    if (!waiting.length) return;
+    this.jumpIndex = (this.jumpIndex + 1) % waiting.length;
+    const target = waiting[this.jumpIndex];
+    this.jumpId = target.id;
+    this.ticketId = null;
+    this.form = null;
+    if (!matches(target, this.search.value())) this.search.set_value("");
+    if (target.stage === "done") {
+      const index = this.ticketsIn("done", false).findIndex(t => t.id === target.id);
+      if (index >= this.doneLimit) this.doneLimit = index + 1;
+    }
+    cx.notify();
+    cx.spawn(async () => { try { this.jumpFocus.focus(); } catch { /* The highlight is the jump when the card is not mounted yet. */ } });
+  }
+  submitComposer(cx) {
+    const title = this.composer.value().trim();
+    if (!title) return;
+    if (title.length > 200) { this.error = "Title must contain 1–200 characters"; cx.notify(); return; }
+    this.composerOpen = true;
+    this.refocusComposer = true;
+    this.act(cx, async () => {
+      await store.createTicket({ projectId: this.projectId, title, kind: "story" });
+      this.composer.set_value("");
+      this.composerOpen = true;
+      this.refocusComposer = true;
+    });
+  }
+  openLoose(cx) {
+    const next = this.ticketId ? true : !this.looseOpen;
+    this.ticketId = null;
+    this.form = null;
+    this.looseOpen = next;
+    this.act(cx, () => this.remember());
+  }
+  openRules(cx) {
+    const rules = this.ruleMap.get(this.projectId) ?? { ageWarnDays: AGE_WARN_DAYS, wipLimit: null };
+    this.warnDays.set_value(String(rules.ageWarnDays));
+    this.wipLimit.set_value(rules.wipLimit == null ? "" : String(rules.wipLimit));
+    this.form = "rules";
+    cx.notify();
+    cx.spawn(async () => { try { this.formFocus.focus(); } catch { /* The form is mounted on the next frame. */ } });
+  }
+  attentionButtons() {
+    const row = h_flex().gap_2().items_center();
+    const need = this.waitingTickets();
+    const looseCount = this.data.loose.filter(t => t.projectId === this.projectId).length;
+    if (need.length) {
+      const word = need.length === 1 ? "needs" : "need";
+      row.child(button("next-needs", `${need.length} ${word} you`, cx => this.jumpToNext(cx)).tooltip("Jump to the next one. Press N."));
+    }
+    if (looseCount || this.looseOpen) row.child(button("loose-toggle", `${looseCount} loose`, cx => this.openLoose(cx)).tooltip("Show threads on no ticket"));
+    return row;
+  }
+  finishMove(cx, id, stage, resolution) {
+    this.act(cx, async () => {
+      const moved = await store.moveTicket(id, stage, resolution);
+      if (moved && typeof moved.warning === "string") this.note = moved.warning;
+    });
+  }
+  rankAgainst(ticket, side) {
+    const peers = this.data.tickets.filter(p => p.projectId === ticket.projectId && p.stage === "backlog" && p.id !== ticket.id).sort(rankOrder);
+    const word = side === "before" ? "above" : "below";
+    window.open_dialog(() => {
+      const dialog = v_flex().gap_3()
+        .child(`Rank #${ticket.number} ${word} another ticket in this project. Dragging onto a card is not available.`);
+      if (peers.length) dialog.child(select(`rank-${side}:${ticket.id}`, peers.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` })), "Choose a ticket", (id, cx) => {
+        window.close_dialog();
+        this.act(cx, () => store.rankTicket(ticket.id, side === "before" ? { before: id } : { after: id }));
+      }));
+      else dialog.child("No other Backlog ticket in this project.");
+      return dialog.child(button(`cancel-rank:${ticket.id}`, "Cancel", () => window.close_dialog()));
+    });
+  }
+  pickParent(ticket) {
+    const peers = this.data.tickets.filter(p => p.id !== ticket.id && p.projectId === ticket.projectId && !p.proposed);
+    window.open_dialog(() => v_flex().gap_3()
+      .child(`Set the parent of #${ticket.number}. Dragging a card onto another is not available.`)
+      .child(select(`parent-pick:${ticket.id}`, [{ id: "none", label: "No parent" }, ...peers.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` }))], "Choose a parent", (id, cx) => {
+        window.close_dialog();
+        this.act(cx, () => store.setParent(ticket.id, id === "none" ? null : id));
+      }))
+      .child(button(`cancel-parent:${ticket.id}`, "Cancel", () => window.close_dialog())));
   }
   remember() { return store.kvSet("board", JSON.stringify({ projectId: this.projectId, looseOpen: this.looseOpen })); }
   openTicket(id, cx) {
@@ -138,19 +265,30 @@ export class BoardPanel extends WatchedView {
     this.sourceIds = new Set(ticket?.threads.map(t => t.id) ?? []);
     if (form === "handoff") this.sourceIds = new Set(ticket?.threads.slice(0, 1).map(t => t.id));
   }
-  move(ticket, stage, cx) {
-    if (stage === "done" && ticket.threads.length) {
+  move(ticket, stage, cx, resolution = "done") {
+    if (ticket.stage === stage && (stage !== "done" || (ticket.resolution ?? "done") === resolution)) return;
+    const problem = isGated(ticket.stage, stage, resolution) ? startProblem(ticket) : null;
+    if (problem) {
+      this.error = `Can't start #${ticket.number}: ${problem}.`;
+      cx.notify();
+      return;
+    }
+    if (stage === "done" && ticket.stage !== "done" && ticket.threads.length) {
+      const wont = resolution === "wont-do";
       window.open_dialog(() => v_flex().gap_3()
-        .child(`Move #${ticket.number} to Done?`)
-        .child("This archives every live thread on the ticket.")
-        .child(h_flex().gap_2()
+        .child(`Move #${ticket.number} to Done${wont ? " as won't do" : ""}?`)
+        .child("This archives every live thread on the ticket. Moving it out of Done brings back the threads this move archived. Won't do ends the ticket the same way.")
+        .child(h_flex().gap_2().flex_wrap()
           .child(button(`cancel-done:${ticket.id}`, "Cancel", () => window.close_dialog()))
-          .child(button(`confirm-done:${ticket.id}`, "Move to Done and archive threads", cx => { window.close_dialog(); this.act(cx, () => store.moveTicket(ticket.id, stage)); }))));
-    } else if (["in-progress", "review"].includes(stage) && ticket.threads.length) {
+          .child(button(`alt-done:${ticket.id}`, wont ? "Move to Done and archive threads" : "Archive as won't do", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, "done", wont ? "done" : "wont-do"); }))
+          .child(primary(`confirm-done:${ticket.id}`, wont ? "Archive as won't do" : "Move to Done and archive threads", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, "done", resolution); }))));
+      return;
+    }
+    if (resolution !== "wont-do" && ["in-progress", "review"].includes(stage) && ticket.threads.length) {
       window.open_dialog(() => v_flex().gap_3()
         .child(`Move #${ticket.number} to ${TITLES[stage]}?`)
-        .child("Move keeps the current threads. Hand off starts a new thread and archives the ones you pick.")
-        .child(h_flex().gap_2()
+        .child("Move keeps the current threads. Hand off starts a new thread and archives the ones you pick. There is no drag.")
+        .child(h_flex().gap_2().flex_wrap()
           .child(button(`cancel-move:${ticket.id}`, "Cancel", () => window.close_dialog()))
           .child(button(`handoff-move:${ticket.id}`, "Hand off…", cx => {
             window.close_dialog();
@@ -158,60 +296,70 @@ export class BoardPanel extends WatchedView {
             this.ticketId = ticket.id;
             this.act(cx, async () => { await this.prepare("handoff", ticket); this.persona = this.personas.includes(PERSONAS[stage]) ? PERSONAS[stage] : ""; });
           }))
-          .child(button(`just-move:${ticket.id}`, "Move without starting a thread", cx => { window.close_dialog(); this.act(cx, () => store.moveTicket(ticket.id, stage)); }))));
-    } else this.act(cx, () => store.moveTicket(ticket.id, stage));
+          .child(button(`just-move:${ticket.id}`, "Move without starting a thread", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, stage, "done"); }))));
+      return;
+    }
+    this.finishMove(cx, ticket.id, stage, resolution);
   }
-  menu(ticket, cx) {
+  menu(ticket, _cx) {
     const menu = new DropdownMenu(`ticket-menu:${ticket.id}`, "···");
     menu.item("Open", cx => this.openTicket(ticket.id, cx));
     if (!ticket.proposed) {
       for (const stage of STAGES.filter(s => s !== ticket.stage)) menu.item(`Move to ${TITLES[stage]}`, cx => this.move(ticket, stage, cx));
+      if (!(ticket.stage === "done" && ticket.resolution === "wont-do")) menu.item("Won't do", cx => this.move(ticket, "done", cx, "wont-do"));
       if (ticket.stage !== "done") menu.item("Start thread", cx => {
         this.ticketId = ticket.id;
         this.act(cx, () => this.prepare("start", ticket));
       });
+      menu.item("Set parent…", () => this.pickParent(ticket));
+    }
+    if (ticket.stage === "backlog") {
+      menu.item("Top of Backlog", cx => this.act(cx, () => store.rankTicket(ticket.id, { top: true })));
+      menu.item("Bottom of Backlog", cx => this.act(cx, () => store.rankTicket(ticket.id, { bottom: true })));
+      menu.item("Rank above…", cx => this.rankAgainst(ticket, "before"));
+      menu.item("Rank below…", cx => this.rankAgainst(ticket, "after"));
     }
     return menu;
   }
   render(cx) {
     const colors = cx.theme().colors;
     const radius = cx.theme().radius;
-    const root = v_flex().size_full().min_w_0().min_h_0().bg(colors.background).text_color(colors.foreground).gap_3();
+    const root = v_flex().size_full().min_w_0().min_h_0().bg(colors.background).text_color(colors.foreground).gap_3()
+      .track_focus(this.boardFocus).tab_stop(true)
+      .on_key_down((event, cx) => {
+        if (event.key !== "n" && event.key !== "N") return;
+        const mods = event.modifiers;
+        if (mods.shift || mods.control || mods.alt || mods.platform || mods.function) return;
+        if (this.fields > 0 || this.form || window.has_active_dialog()) return;
+        this.jumpToNext(cx);
+        cx.stop_propagation();
+      });
     if (this.error) {
       root.child(h_flex().gap_2().px_5().pt_3().items_center()
         .child(muted(this.error, cx).flex_1())
         .child(button("retry-board", "Retry", cx => this.act(cx, () => this.refresh()))));
     }
+    if (this.note) root.child(h_flex().px_5().child(muted(this.note, cx)));
     if (!this.projectId) return root.child(v_flex().flex_1().items_center().justify_center().child(muted("Open a project to use the board", cx)));
     if (this.ticketId && this.ticket) return root.child(this.renderTicket(cx));
 
     const projectRows = this.projects.map(p => ({ id: p.id, label: p.name }));
-    const own = this.data.tickets.filter(t => (t.projectId === this.projectId || this.shown.has(t.projectId)) && matches(t, this.search.value()));
-    const need = own.filter(needsYou);
-    const looseCount = this.data.loose.filter(t => t.projectId === this.projectId).length;
     const more = new DropdownMenu("board-more", "More");
-    more.item("Link GitHub repos", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); }));
-    if (looseCount) more.item(`Threads without a ticket (${looseCount})`, cx => this.act(cx, async () => { this.looseOpen = !this.looseOpen; await this.remember(); }));
-    if (need.length) more.item(`Needs attention (${need.length})`, cx => this.openTicket(need[0].id, cx));
     for (const p of this.projects.filter(p => p.id !== this.projectId)) {
       more.item(`${this.shown.has(p.id) ? "Hide" : "Also show"} ${p.name}`, cx => {
         this.shown.has(p.id) ? this.shown.delete(p.id) : this.shown.add(p.id);
         cx.notify();
       });
     }
-
-    // One quiet toolbar: project · search · New · More
-    root.child(h_flex().gap_2().px_5().pt_4().pb_1().items_center()
-      .child(select("board-project", projectRows, this.projects.find(p => p.id === this.projectId)?.name ?? "Project", (id, cx) => this.act(cx, async () => { this.projectId = id; this.form = null; await this.remember(); })))
-      .child(new Input(this.search).aria_label("Search").flex_1().min_w("8rem").on_change((_, cx) => cx.notify()))
-      .child(primary("new-ticket", "New", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); }))
-      .child(more));
-
-    // Hidden kg-ui targets for earlier e2e / literal paths (not painted as chrome)
-    root.child(h_flex().h(0).overflow_hidden().opacity(0)
-      .child(button("repos", "Link GitHub repos", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); })))
-      .child(button("loose-toggle", looseCount ? `Show ${looseCount} threads with no ticket` : "No threads without a ticket", cx => this.act(cx, async () => { this.looseOpen = !this.looseOpen; await this.remember(); })))
-      .child(button("next-needs", need.length ? `Open next ticket that needs you (${need.length})` : "No tickets need you", cx => { if (need.length) this.openTicket(need[0].id, cx); })));
+    const projectName = this.projects.find(p => p.id === this.projectId)?.name ?? "this project";
+    const toolbar = h_flex().gap_2().px_5().pt_4().pb_1().items_center().flex_wrap()
+      .child(select("board-project", projectRows, projectName, (id, cx) => { this.jumpIndex = -1; this.act(cx, async () => { this.projectId = id; this.form = null; await this.remember(); }); }))
+      .child(new Input(this.search).aria_label("Search").flex_1().min_w("6rem").on_change((_, cx) => cx.notify()))
+      .child(button("rules", "Rules", cx => this.openRules(cx)))
+      .child(button("repos", "Repos", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); })))
+      .child(this.attentionButtons());
+    if (this.projects.length > 1) toolbar.child(more);
+    root.child(toolbar);
 
     if (this.form) root.child(this.renderForm(cx).mx_5());
     if (this.looseOpen) {
@@ -219,59 +367,60 @@ export class BoardPanel extends WatchedView {
         .child(h_flex().items_center()
           .child(div().font_weight(600).child("Without a ticket").flex_1())
           .child(button("loose-close", "Done", cx => this.act(cx, async () => { this.looseOpen = false; await this.remember(); }))))
-        .child(new Scroll(this.scroll).max_h("9rem").child(v_flex().gap_1().children(
-          this.data.loose.filter(t => t.projectId === this.projectId).map(t => h_flex().gap_2().items_center()
+        .child(muted("New ticket puts the thread at the bottom of Backlog. In progress and Review start it in that column. Add a thread to an open ticket from that ticket. Drag is not available.", cx))
+        .child(new Scroll(this.scroll).max_h("12rem").child(v_flex().gap_1().children(
+          this.data.loose.filter(t => t.projectId === this.projectId).map(t => h_flex().gap_2().items_center().flex_wrap()
             .child(button(`loose-open:${t.id}`, t.title, cx => this.act(cx, () => host.openThread(t.id))).flex_1())
-            .child(button(`loose-new:${t.id}`, "New ticket", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id })))),
+            .child(button(`loose-new:${t.id}`, "New ticket", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id, kind: "story" }))))
+            .child(button(`loose-ip:${t.id}`, "In progress", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id, stage: "in-progress", kind: "story" }))))
+            .child(button(`loose-review:${t.id}`, "Review", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id, stage: "review", kind: "story" }))))),
         )))));
     }
 
+    const boardRules = this.ruleMap.get(this.projectId) ?? { ageWarnDays: AGE_WARN_DAYS, wipLimit: null };
+    const ownWorking = this.data.tickets.filter(t => t.projectId === this.projectId && t.stage === "in-progress").length;
     root.child(h_flex().items_stretch().flex_1().min_h_0().min_w_0().gap_3().px_5().pb_5().overflow_x_scroll().children(STAGES.map((stage, ix) => {
-      const tickets = own.filter(t => t.stage === stage).sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || b.updatedAt - a.updatedAt);
+      const tickets = this.ticketsIn(stage);
       const visible = stage === "done" ? tickets.slice(0, this.doneLimit) : tickets;
+      const over = stage === "in-progress" && boardRules.wipLimit !== null && ownWorking > boardRules.wipLimit;
+      const count = div().text_size(11).child(over ? `${ownWorking} / ${boardRules.wipLimit}` : String(tickets.length));
+      if (over) count.text_color("#d97706").font_weight(600);
+      else count.text_color(colors.muted_foreground);
       const heading = h_flex().gap_2().px_3().pt_3().pb_2().items_baseline()
         .child(div().font_weight(600).text_size(13).child(TITLES[stage]))
-        .child(div().text_color(colors.muted_foreground).text_size(11).child(String(tickets.length)));
-      const column = v_flex().flex_1().min_w("14rem").min_h_0().rounded(radius.lg).bg(colors.surface).child(heading);
-      const cards = visible.map(t => {
-        const parent = t.parentId ? this.data.tickets.find(p => p.id === t.parentId) : null;
-        const children = this.data.tickets.filter(c => c.parentId === t.id);
-        const next = NEXT[t.stage];
-        const card = v_flex().gap_2().px_3().py_3().rounded(radius.md).bg(colors.background).border_1().border_color(colors.border);
-        if (t.proposed) card.border_dashed();
-        card.child(h_flex().gap_2().items_start()
-          .child(v_flex().gap_1().flex_1().min_w_0()
-            .child(h_flex().gap_1().items_baseline()
-              .child(div().text_color(colors.muted_foreground).text_size(11).child(`#${t.number}`))
-              .child(new KgButton(`card:${t.id}`).label(t.title).ghost().compact().flex_1().min_w_0().on_click((a, b) => this.openTicket(t.id, clickCx(a, b)))))
-            .child(h_flex().gap_2().items_center().children([
-              needsYou(t) && !t.proposed ? muted("Needs you", cx) : null,
-              parent ? muted(`Under #${parent.number}`, cx) : null,
-              children.length ? muted(`${children.filter(c => c.stage === "done").length}/${children.length} done`, cx) : null,
-              t.projectId !== this.projectId ? muted(this.projects.find(p => p.id === t.projectId)?.name ?? "", cx) : null,
-            ].filter(Boolean))))
-          .child(this.menu(t, cx)));
-        if (t.proposed) {
-          card.child(h_flex().gap_2()
-            .child(primary(`accept:${t.id}`, "Accept", cx => this.act(cx, () => store.acceptTicket(t.id))))
-            .child(button(`dismiss:${t.id}`, "Dismiss", cx => this.act(cx, () => store.dismissTicket(t.id)))));
-        } else if (next) {
-          card.child(h_flex().justify_end()
-            .child(button(`move:${t.id}:${next}`, `→ ${TITLES[next]}`, cx => this.move(t, next, cx))));
-        }
-        const thread = target(t.threads);
-        if (thread) {
-          card.child(h_flex().gap_2().items_center()
-            .child(new ThreadStatus(thread.id))
-            .child(button(`card-thread:${thread.id}`, thread.title, cx => this.act(cx, () => host.openThread(thread.id))).flex_1().min_w_0()));
-        }
-        return card;
-      });
+        .child(count);
+      const column = v_flex().flex_1().min_w("11rem").min_h_0().rounded(radius.lg).bg(colors.surface).child(heading)
+        .child(muted(stage === "backlog"
+          ? "New tickets go to the bottom. ··· ranks this column: Top of Backlog, Bottom of Backlog, or above or below another ticket in this project. ··· also moves and sets the parent. Drag is not available."
+          : "Move from ··· or the button on the card. Drag is not available.", cx).px_3().pb_2());
+      const cards = visible.map(t => this.renderCard(t, cx, colors, radius));
       const body = v_flex().gap_2().px_2().pb_3().children(cards);
       if (stage === "backlog" && !tickets.length && !this.search.value().trim()) {
-        body.child(v_flex().gap_2().py_6().px_2().items_center()
-          .child(muted("Nothing here yet", cx))
-          .child(primary("empty-create", "New Ticket", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); })));
+        body.child(v_flex().gap_2().py_6().px_2().items_center().child(muted("Nothing here yet", cx)));
+      }
+      if (stage === "backlog" && !this.search.value().trim()) {
+        if (this.composerOpen) {
+          body.child(new Input(this.composer).aria_label("New ticket title").track_focus(this.composerFocus).mx_2()
+            .on_key_down((event, cx) => {
+              if (event.key !== "escape") return;
+              this.composerOpen = false;
+              this.composer.set_value("");
+              this.refocusComposer = false;
+              cx.stop_propagation();
+              cx.notify();
+            }));
+        } else {
+          body.child(button("new-ticket", "New ticket", cx => {
+            this.composerOpen = true;
+            this.composer.set_value("");
+            cx.notify();
+            cx.spawn(async () => { try { this.composerFocus.focus(); } catch { /* The field is mounted on the next frame. */ } });
+          }).mx_2());
+        }
+        if (this.repos.length) body.child(button("import-issue", "Import issue", cx => this.act(cx, async () => {
+          this.form = "import";
+          this.issues = await github.listIssues(this.projectId, { query: this.issueQuery.value(), ...this.issueFilters });
+        })).mx_2());
       }
       column.child(new Scroll(this.columns[ix]).flex_1().min_h_0().child(body));
       if (stage === "done" && visible.length < tickets.length) {
@@ -281,24 +430,102 @@ export class BoardPanel extends WatchedView {
     })));
     return root;
   }
+  renderCard(t, cx, colors, radius) {
+    const parent = t.parentId ? this.data.tickets.find(p => p.id === t.parentId) : null;
+    const children = this.data.tickets.filter(c => c.parentId === t.id);
+    const next = NEXT[t.stage];
+    const card = v_flex().id(`ticket-${t.id}`).gap_2().px_3().py_3().rounded(radius.md).bg(colors.background).border_1().border_color(this.jumpId === t.id ? colors.primary : colors.border);
+    if (t.proposed) card.border_dashed();
+    const opener = new KgButton(`card:${t.id}`).label(t.title).ghost().compact().flex_1().min_w_0().on_click((a, b) => this.openTicket(t.id, clickCx(a, b)));
+    if (this.jumpId === t.id) opener.track_focus(this.jumpFocus);
+    const meta = [];
+    if (t.stage === "backlog" && needsYou(t) && !t.proposed) meta.push(muted("Needs you", cx));
+    if (t.kind) meta.push(muted(t.kind, cx));
+    if (t.stage === "done" && t.resolution === "wont-do") meta.push(muted("won't do", cx));
+    const ac = criteriaLine(t.description, t.kind);
+    if (ac) meta.push(muted(ac, cx));
+    const age = t.stage === "in-progress" || t.stage === "review" ? daysInStage(t.stageAt) : null;
+    if (age !== null) {
+      const warn = this.ruleMap.get(t.projectId)?.ageWarnDays ?? AGE_WARN_DAYS;
+      const label = div().text_size(12).child(`${age}d`);
+      label.text_color(age > warn ? "#d97706" : colors.muted_foreground);
+      meta.push(label);
+    }
+    const subs = subTicketLine(children);
+    if (subs) meta.push(muted(subs, cx));
+    if (parent) meta.push(button(`parent:${t.id}`, `Under #${parent.number}`, cx => this.openTicket(parent.id, cx)));
+    if (t.projectId !== this.projectId) meta.push(muted(this.projects.find(p => p.id === t.projectId)?.name ?? "", cx));
+    card.child(h_flex().gap_2().items_start()
+      .child(v_flex().gap_1().flex_1().min_w_0()
+        .child(h_flex().gap_1().items_baseline()
+          .child(div().text_color(colors.muted_foreground).text_size(11).child(`#${t.number}`))
+          .child(opener))
+        .child(h_flex().gap_2().items_center().flex_wrap().children(meta)))
+      .child(this.menu(t, cx)));
+    const held = t.stage === "backlog" ? startProblem(t) : null;
+    if (held) card.child(muted(`Can't leave Backlog yet: ${held}. Won't do is still allowed.`, cx));
+    const blockers = openBlockers(t);
+    if (blockers.length && t.stage !== "done") {
+      card.child(h_flex().gap_1().flex_wrap().items_center()
+        .child(muted("Blocked by", cx))
+        .children(blockers.map(b => button(`blocked:${t.id}:${b.id}`, `#${b.number} ${b.title}`, cx => this.openTicket(b.id, cx)))));
+    }
+    if (t.proposed) {
+      card.child(h_flex().gap_2()
+        .child(primary(`accept:${t.id}`, "Accept", cx => this.act(cx, () => store.acceptTicket(t.id))))
+        .child(button(`dismiss:${t.id}`, "Dismiss", cx => this.act(cx, () => store.dismissTicket(t.id)))));
+    } else if (next) {
+      card.child(h_flex().justify_end()
+        .child(button(`move:${t.id}:${next}`, `→ ${TITLES[next]}`, cx => this.move(t, next, cx))));
+    }
+    const statusLine = threadStatusLine(t.threads);
+    if (statusLine) card.child(muted(statusLine, cx));
+    const thread = target(t.threads);
+    if (thread) {
+      card.child(h_flex().gap_2().items_center()
+        .child(new ThreadStatus(thread.id))
+        .child(button(`card-thread:${thread.id}`, thread.title, cx => this.act(cx, () => host.openThread(thread.id))).flex_1().min_w_0()));
+    } else if (!t.proposed && t.stage !== "done") {
+      card.child(button(`start-card:${t.id}`, "Start thread", cx => {
+        this.ticketId = t.id;
+        this.act(cx, () => this.prepare("start", t));
+      }));
+    }
+    return card;
+  }
   renderTicket(cx) {
     const t = this.ticket;
     const colors = cx.theme().colors;
-    const head = h_flex().gap_3().px_5().pt_4().pb_2().items_center()
+    const stageLine = `${TITLES[t.stage]}${t.stage === "done" && t.resolution === "wont-do" ? " · won't do" : ""}`;
+    const head = h_flex().gap_3().px_5().pt_4().pb_2().items_center().flex_wrap()
       .child(button("back-board", "Board", cx => { this.ticketId = null; this.form = null; this.pendingMove = null; cx.notify(); }))
       .child(v_flex().gap_1().flex_1().min_w_0()
         .child(div().font_weight(600).text_size(16).child(`#${t.number}  ${t.title}`))
-        .child(muted(TITLES[t.stage], cx)))
+        .child(muted(stageLine, cx)))
+      .child(this.attentionButtons())
       .child(this.menu(t, cx));
     const body = v_flex().p_5().gap_4();
+    if (looksLikeUserStory(t.title)) body.child(muted(USER_STORY_WARNING, cx));
+    if (!t.proposed) body.child(select("ticket-kind", [{ id: "none", label: "No kind" }, ...KINDS.map(kind => ({ id: kind, label: kind[0].toUpperCase() + kind.slice(1) }))], t.kind ? t.kind[0].toUpperCase() + t.kind.slice(1) : "No kind", (id, cx) => this.act(cx, () => store.editTicket(t.id, { kind: id === "none" ? null : id }))));
+    const ac = criteriaLine(t.description, t.kind);
+    if (ac) body.child(muted(ac, cx));
+    const held = t.stage === "backlog" ? startProblem(t) : null;
+    if (held) body.child(muted(`Can't leave Backlog yet: ${held}. Won't do is still allowed.`, cx));
     if (t.proposed) body.child(h_flex().gap_2().child(button("accept-ticket", "Accept ticket", cx => this.act(cx, () => store.acceptTicket(t.id)))).child(button("dismiss-ticket", "Dismiss", cx => this.act(cx, async () => { await store.dismissTicket(t.id); this.ticketId = null; }))));
-    if (t.pendingStage) body.child(h_flex().gap_2().child(`Move to ${TITLES[t.pendingStage]}?`)
-      .child(button("accept-move", "Move", cx => this.move(t, t.pendingStage, cx)))
-      .child(button("dismiss-move", "Dismiss", cx => this.act(cx, () => store.dismissMove(t.id)))));
+    if (t.pendingStage) {
+      const pending = h_flex().gap_2().flex_wrap().child(`Move to ${TITLES[t.pendingStage]}?`)
+        .child(button("accept-move", "Move", cx => this.move(t, t.pendingStage, cx)));
+      if (t.pendingStage === "done") pending.child(button("accept-wont", "Won't do", cx => this.move(t, "done", cx, "wont-do")));
+      pending.child(button("dismiss-move", "Dismiss", cx => this.act(cx, () => store.dismissMove(t.id))));
+      body.child(pending);
+    }
     body.child(new Markdown(`description:${t.id}`, t.description || "No description"));
     body.child(button("edit-ticket", "Edit ticket…", cx => { this.form = "edit"; this.title.set_value(t.title); this.description.set_value(t.description); cx.notify(); }));
     if (t.issue) body.child(button("open-issue", `${t.issue.repo}#${t.issue.number}`, cx => this.act(cx, () => host.openUrl(t.issue.url))));
+    const quiet = threadStatusLine(t.threads);
     body.child(div().child(`Threads · ${t.threads.length}`));
+    if (quiet) body.child(muted(quiet, cx));
+    body.child(muted("Remove a thread from the ticket with Thread actions. Drag back to the loose list is not available.", cx));
     for (const thread of t.threads) {
       const project = this.projects.find(p => p.id === thread.projectId);
       const menu = new DropdownMenu(`thread-menu:${thread.id}`, "Thread actions")
@@ -313,8 +540,26 @@ export class BoardPanel extends WatchedView {
       if (t.threads.length) body.child(h_flex().gap_2().child(button("handoff-thread", "Start new thread from this one", cx => this.act(cx, () => this.prepare("handoff", t))))
         .child(button("consolidate-threads", "Merge threads into one new thread", cx => this.act(cx, () => this.prepare("consolidate", t)))));
       body.child(select("parent-ticket", [{ id: "none", label: "No parent" }, ...this.data.tickets.filter(p => p.id !== t.id && p.projectId === t.projectId && !p.proposed).map(p => ({ id: p.id, label: `#${p.number} ${p.title}` }))], t.parentId ? `Parent #${this.data.tickets.find(p => p.id === t.parentId)?.number}` : "Set parent…", (id, cx) => this.act(cx, () => store.setParent(t.id, id === "none" ? null : id))));
+      const childChoices = this.data.tickets.filter(p => p.id !== t.id && p.projectId === t.projectId && !p.proposed && !p.parentId);
+      if (childChoices.length) body.child(select("add-sub", childChoices.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` })), "Add sub-ticket", (id, cx) => this.act(cx, () => store.setParent(id, t.id))));
     }
-    for (const child of t.subTickets) body.child(button(`sub:${child.id}`, `↳ #${child.number} ${child.title} · ${TITLES[child.stage]}`, cx => this.openTicket(child.id, cx)));
+    if (!t.proposed) {
+      const blockerChoices = this.data.tickets.filter(p => canBlock(this.data.tickets, t.id, p.id));
+      body.child(div().child("Blocked by"));
+      for (const blocker of t.blockedBy ?? []) body.child(h_flex().gap_2().items_center()
+        .child(button(`open-blocker:${blocker.id}`, `#${blocker.number} ${blocker.title} · ${TITLES[blocker.stage]}`, cx => this.openTicket(blocker.id, cx)).flex_1())
+        .child(button(`remove-blocker:${blocker.id}`, "Remove", cx => this.act(cx, () => store.unblockTicket(t.id, blocker.id)))));
+      if (blockerChoices.length) body.child(select("add-blocker", blockerChoices.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` })), "Add blocker", (id, cx) => this.act(cx, () => store.blockTicket(t.id, id))));
+      if ((t.blocks ?? []).length) {
+        body.child(div().child("Blocks"));
+        for (const blocked of t.blocks) body.child(button(`blocks:${blocked.id}`, `#${blocked.number} ${blocked.title}`, cx => this.openTicket(blocked.id, cx)));
+      }
+    }
+    const subs = subTicketLine(t.subTickets ?? []);
+    if (subs) body.child(muted(subs, cx));
+    for (const child of t.subTickets ?? []) body.child(h_flex().gap_2().items_center()
+      .child(button(`sub:${child.id}`, `↳ #${child.number} ${child.title} · ${TITLES[child.stage]}${child.resolution === "wont-do" ? " · won't do" : ""}`, cx => this.openTicket(child.id, cx)).flex_1())
+      .child(button(`unsub:${child.id}`, "Remove", cx => this.act(cx, () => store.setParent(child.id, null)))));
     if (this.form) body.child(this.renderForm(cx));
     body.child(div().child("Comments"));
     for (const comment of t.comments) body.child(v_flex().gap_2().child(muted(comment.github_login ?? comment.persona ?? comment.thread_id ?? "You", cx)).child(new Markdown(comment.id, comment.body))
@@ -336,14 +581,27 @@ export class BoardPanel extends WatchedView {
   }
   renderForm(cx) {
     const colors = cx.theme().colors;
-    const form = v_flex().p_4().gap_3().rounded(cx.theme().radius.lg).bg(colors.surface).border_1().border_color(colors.border);
+    const form = v_flex().p_4().gap_3().rounded(cx.theme().radius.lg).bg(colors.surface).border_1().border_color(colors.border)
+      .track_focus(this.formFocus)
+      .on_key_down((event, cx) => {
+        if (event.key !== "escape") return;
+        this.form = null;
+        this.pendingMove = null;
+        cx.stop_propagation();
+        cx.notify();
+      });
     const cancel = button("cancel-form", "Cancel", cx => { this.form = null; this.pendingMove = null; cx.notify(); });
     if (this.form === "new" || this.form === "edit") {
+      const projectName = this.projects.find(p => p.id === this.projectId)?.name ?? "this project";
       form.child(div().font_weight(600).child(this.form === "new" ? "New ticket" : "Edit ticket"));
-      form.child(div().id("ticket-title").child(new Input(this.title).aria_label("Ticket title").on_change((_, cx) => cx.notify())));
+      if (this.form === "new") form.child(muted(`Creates a ticket in ${projectName}. Done archives its threads.`, cx));
+      form.child(div().text_size(12).child("Ticket title"));
+      form.child(new Input(this.title).aria_label("Ticket title").on_change((_, cx) => cx.notify()));
+      if (looksLikeUserStory(this.title.value())) form.child(muted(USER_STORY_WARNING, cx));
+      form.child(div().text_size(12).child("Description"));
       form.child(new Textarea(this.description).aria_label("Description"));
       const titleOk = this.title.value().trim().length > 0 && this.title.value().trim().length <= 200;
-      form.child(h_flex().gap_2().justify_end().child(cancel).child(new KgButton("save-ticket").primary().compact().label(this.form === "new" ? "Create" : "Save").disabled(this.busy || !titleOk).on_click((a, b) => this.act(clickCx(a, b), async () => {
+      form.child(h_flex().gap_2().justify_end().child(cancel).child(new KgButton("save-ticket").primary().compact().label(this.form === "new" ? "Create ticket" : "Save").disabled(this.busy || !titleOk).on_click((a, b) => this.act(clickCx(a, b), async () => {
         if (this.form === "new") await store.createTicket({ projectId: this.projectId, title: this.title.value(), description: this.description.value() });
         else await store.editTicket(this.ticketId, { title: this.title.value(), description: this.description.value() });
         this.form = null;
@@ -358,7 +616,12 @@ export class BoardPanel extends WatchedView {
         cx.notify();
       }));
       const actions = h_flex().gap_2().child(cancel);
-      if (this.pendingMove) actions.child(button("just-move", "Move without starting a thread", cx => this.act(cx, async () => { await store.moveTicket(this.pendingMove.id, this.pendingMove.stage); this.pendingMove = null; this.form = null; })));
+      if (this.pendingMove) actions.child(button("just-move", "Move without starting a thread", cx => {
+        const pending = this.pendingMove;
+        this.pendingMove = null;
+        this.form = null;
+        this.finishMove(cx, pending.id, pending.stage, "done");
+      }));
       const canSubmit = this.form === "start" || this.sourceIds.size > 0;
       actions.child(new KgButton("submit-thread").primary().label(this.form === "start" ? "Start thread" : this.form === "consolidate" ? "Merge into new thread" : "Start new thread from sources").disabled(this.busy || !canSubmit).on_click((a, b) => this.act(clickCx(a, b), async () => {
         const options = { persona: this.persona || null, prompt: this.prompt.value() };
@@ -375,9 +638,28 @@ export class BoardPanel extends WatchedView {
       for (const thread of loose) form.child(button(`attach:${thread.id}`, thread.title, cx => this.act(cx, async () => { await store.attach(this.ticketId, thread.id); this.form = null; })));
       if (!loose.length) form.child(muted("No threads without a ticket in this project", cx));
       form.child(cancel);
-    } else if (this.form === "repos") {
-      for (const repo of this.repos) form.child(h_flex().gap_2().child(repo).child(button(`unlink:${repo}`, "Unlink", cx => this.act(cx, () => store.unlinkRepo(this.projectId, repo)))));
-      form.child(h_flex().gap_2().child(new Input(this.repo).aria_label("GitHub repository")).child(button("link-repo", "Link", cx => this.act(cx, async () => { await store.linkRepo(this.projectId, await github.normalizeRepo(this.repo.value())); this.repo.set_value(""); }))));
+    } else if (this.form === "rules") {
+      form.child(div().font_weight(600).child("Rules"));
+      form.child(muted("For this project's tickets. A full In progress column warns. It does not block a move.", cx));
+      form.child(div().text_size(12).child("Days in a column before a warning"));
+      form.child(new Input(this.warnDays).aria_label("Warning days"));
+      form.child(div().text_size(12).child("Most tickets in In progress"));
+      form.child(new Input(this.wipLimit).aria_label("Work in progress limit"));
+      form.child(h_flex().gap_2().justify_end().child(cancel).child(primary("save-rules", "Save", cx => this.act(cx, async () => {
+        const days = Number(this.warnDays.value());
+        const raw = this.wipLimit.value().trim();
+        const limit = raw === "" || raw.toLowerCase() === "off" ? null : Number(raw);
+        await store.setBoardRules(this.projectId, { ageWarnDays: days, wipLimit: limit });
+        this.form = null;
+      }))));
+    } else if (this.form === "repos" || this.form === "import") {
+      if (this.form === "import") {
+        form.child(div().font_weight(600).child("Import issue"));
+        form.child(muted("Copies the issue onto the bottom of Backlog. Nothing is written to GitHub.", cx));
+      } else {
+        for (const repo of this.repos) form.child(h_flex().gap_2().child(repo).child(button(`unlink:${repo}`, "Unlink", cx => this.act(cx, () => store.unlinkRepo(this.projectId, repo)))));
+        form.child(h_flex().gap_2().child(new Input(this.repo).aria_label("GitHub repository")).child(button("link-repo", "Link", cx => this.act(cx, async () => { await store.linkRepo(this.projectId, await github.normalizeRepo(this.repo.value())); this.repo.set_value(""); }))));
+      }
       form.child(new Input(this.issueQuery).aria_label("Search open issues"));
       for (const field of ["label", "assignee", "author"]) {
         const values = new Set(this.issues.flatMap(issue => field === "label" ? issue.labels?.map(l => l.name) ?? [] : field === "assignee" ? issue.assignees?.map(a => a.login) ?? [] : [issue.author?.login]).filter(Boolean));

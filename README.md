@@ -19,7 +19,7 @@ kg plugin install .
 
 Approve the powers screen. The plugin reads threads, stores tickets in its own SQLite file under `~/.kagan/plugins/dev.kagan.kanban/`, and can run `gh` and `git` with your normal credentials (issue import is copy-only; `gh` itself is a full CLI). Set **Program for new threads** and optionally **Personas folder** (opening the board may `git pull --ff-only` that folder).
 
-**First success:** click **Board** on the rail (or Command-Shift-K) → **Create ticket** → type a title → **Create ticket**. You should see it in Backlog.
+**First success:** click **Board** on the rail (or Command-Shift-K) → **New ticket** → type a title → Enter. The ticket lands at the bottom of Backlog.
 
 Optional: Settings → Appearance → Sidebar → pick this plugin’s ticket list. Command-I opens the current thread’s ticket.
 
@@ -37,7 +37,12 @@ Optional: Settings → Appearance → Sidebar → pick this plugin’s ticket li
 
 ```sh
 kg kanban list --project <id> --json
-kg kanban ticket add "Title" --desc "Description"
+kg kanban ticket add "Title" --desc "Description" --kind story|bug|task
+kg kanban ticket rank '#1' --top|--bottom|--before '#2'|--after '#2'
+kg kanban ticket block '#2' --by '#1'
+kg kanban ticket unblock '#2' --by '#1'
+kg kanban move done '#1' --wont-do
+kg kanban rules --warn-days 14 --wip-limit 3
 kg kanban ticket new [thread-id]
 kg kanban ticket show '#1'
 kg kanban ticket attach '#1' [thread-id]

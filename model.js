@@ -35,6 +35,178 @@ export function matches(ticket, search) {
   return words.includes(search.trim().toLowerCase());
 }
 
+export const KINDS = ["story", "bug", "task"];
+export const AGE_WARN_DAYS = 14;
+const DAY_MS = 24 * 60 * 60_000;
+export const BUG_TEMPLATE = "## Steps to reproduce\n\n1. \n\n## Expected\n\n\n## Actual\n\n\n## Environment\n\n";
+const BUG_SECTIONS = ["Steps to reproduce", "Expected", "Actual"];
+const WORKING = new Set(["starting", "active", "stopping"]);
+
+/** @param {string} value @param {boolean} [allowNone] */
+export function parseKind(value, allowNone = false) {
+  if (allowNone && value === "none") return null;
+  if (!KINDS.includes(value)) throw new Error("Kind must be story, bug, or task");
+  return value;
+}
+
+/** @param {string} description @param {string} name */
+export function section(description, name) {
+  const lines = String(description ?? "").split(/\r?\n/);
+  const wanted = name.toLocaleLowerCase();
+  for (let index = 0; index < lines.length; index++) {
+    const heading = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(lines[index]);
+    if (!heading || heading[2].toLocaleLowerCase() !== wanted) continue;
+    const level = heading[1].length;
+    const body = [];
+    for (const line of lines.slice(index + 1)) {
+      const next = /^(#{1,6})\s/.exec(line);
+      if (next && next[1].length <= level) break;
+      body.push(line);
+    }
+    return body.join("\n");
+  }
+  return null;
+}
+
+/** @param {string} description */
+export function acceptanceCriteria(description) {
+  const body = section(description, "Acceptance criteria");
+  if (body === null) return null;
+  let done = 0;
+  let total = 0;
+  for (const line of body.split("\n")) {
+    const item = /^\s*[-*+]\s+\[([ xX])\]\s+\S/.exec(line);
+    if (!item) continue;
+    total += 1;
+    if (item[1] !== " ") done += 1;
+  }
+  return { done, total };
+}
+
+/** @param {{kind: string | null, description: string}} ticket */
+export function startProblem(ticket) {
+  if (ticket.kind === "story") {
+    const criteria = acceptanceCriteria(ticket.description);
+    if (!criteria) return "no \"## Acceptance criteria\" list";
+    if (criteria.total === 0) return "its \"## Acceptance criteria\" section has no \"- [ ]\" items";
+    return null;
+  }
+  if (ticket.kind === "bug") {
+    const missing = BUG_SECTIONS.filter(name => !section(ticket.description, name)?.replace(/^\s*\d+\.\s*$/gm, "").trim());
+    return missing.length ? `a bug needs "## ${missing.join("\", \"## ")}" filled in` : null;
+  }
+  return null;
+}
+
+/** @param {string} from @param {string} to @param {string} [resolution] */
+export function isGated(from, to, resolution = "done") {
+  return from === "backlog" && to !== "backlog" && !(to === "done" && resolution === "wont-do");
+}
+
+/** @param {string} title */
+export function looksLikeUserStory(title) {
+  return /^\s*as an?\s/i.test(String(title ?? ""));
+}
+export const USER_STORY_WARNING = "Titles that start with \"As a\" read as a user story. Keep the title short and put the story in the description.";
+
+/** @param {number | null} stageAt @param {number} [now] */
+export function daysInStage(stageAt, now = Date.now()) {
+  return stageAt === null || stageAt === undefined ? null : Math.max(0, Math.floor((now - stageAt) / DAY_MS));
+}
+
+/** @param {{proposed: boolean, rank: number | null, number: number}} a @param {{proposed: boolean, rank: number | null, number: number}} b @param {(a: any, b: any) => number} [tie] */
+export function backlogOrder(a, b, tie = () => 0) {
+  return Number(b.proposed) - Number(a.proposed) || (a.rank ?? Infinity) - (b.rank ?? Infinity) || tie(a, b) || a.number - b.number;
+}
+
+/** @param {{rank: number | null, number: number}} a @param {{rank: number | null, number: number}} b */
+export function rankOrder(a, b) {
+  return (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.number - b.number;
+}
+
+/** @param {readonly {id: string, rank: number | null}[]} others @param {{top?: true, bottom?: true, before?: string, after?: string}} place */
+export function rankFor(others, place) {
+  const ranks = others.map(item => item.rank).filter(rank => rank !== null);
+  if ("top" in place && place.top) return ranks.length ? Math.min(...ranks) - 1 : 1;
+  if ("bottom" in place && place.bottom) return ranks.length ? Math.max(...ranks) + 1 : 1;
+  const anchorId = "before" in place && place.before ? place.before : place.after;
+  const at = others.findIndex(item => item.id === anchorId);
+  if (at < 0) throw new Error("That ticket is not in this Backlog.");
+  const anchor = others[at].rank;
+  if (anchor === null) return null;
+  const neighbour = others[at + ("before" in place && place.before ? -1 : 1)]?.rank;
+  if (neighbour === undefined) return anchor + ("before" in place && place.before ? -1 : 1);
+  if (neighbour === null) return null;
+  const middle = (anchor + neighbour) / 2;
+  return middle === anchor || middle === neighbour ? null : middle;
+}
+
+/** @param {any[]} tickets @param {string} stage @param {string} boardProjectId @param {string[]} shownIds */
+export function sortColumn(tickets, stage, boardProjectId, shownIds) {
+  const tie = (a, b) => {
+    const place = (id) => id === boardProjectId ? -1 : Math.max(shownIds.indexOf(id), 0);
+    return place(a.projectId) - place(b.projectId);
+  };
+  return [...tickets].sort(stage === "backlog"
+    ? (a, b) => backlogOrder(a, b, tie)
+    : (a, b) => Number(needsYou(b)) - Number(needsYou(a)) || b.updatedAt - a.updatedAt || a.number - b.number);
+}
+
+/** @param {any} ticket */
+export function openBlockers(ticket) {
+  return (ticket.blockedBy ?? []).filter(ref => ref.stage !== "done");
+}
+
+/** @param {readonly any[]} tickets @param {string} ticketId @param {string} blockerId */
+export function canBlock(tickets, ticketId, blockerId) {
+  const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
+  const ticket = byId.get(ticketId);
+  const blocker = byId.get(blockerId);
+  if (!ticket || !blocker || ticket.id === blocker.id || ticket.projectId !== blocker.projectId || ticket.proposed || blocker.proposed) return false;
+  const seen = new Set();
+  const waiting = [blocker.id];
+  for (let id = waiting.pop(); id !== undefined; id = waiting.pop()) {
+    if (id === ticket.id) return false;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    waiting.push(...(byId.get(id)?.blockedBy ?? []).map(ref => ref.id));
+  }
+  return true;
+}
+
+/** @param {readonly any[]} children */
+export function subTicketLine(children) {
+  if (!children.length) return null;
+  const wont = children.filter(child => child.stage === "done" && child.resolution === "wont-do").length;
+  const done = children.filter(child => child.stage === "done" && child.resolution !== "wont-do").length;
+  const noun = children.length === 1 ? "sub-ticket" : "sub-tickets";
+  return `${done} of ${children.length} ${noun} done${wont ? ` · ${wont} won't do` : ""}`;
+}
+
+/** Thread status from `threads.list` only. Idle tickets stay quiet. Pending is a status, not a model. */
+export function threadStatusLine(threads) {
+  let working = 0;
+  let pending = 0;
+  let need = 0;
+  for (const thread of threads ?? []) {
+    if (WORKING.has(thread.status)) working += 1;
+    else if (thread.status === "pending") pending += 1;
+    if (attention(thread)) need += 1;
+  }
+  const parts = [];
+  if (working) parts.push(`${working} working`);
+  if (pending) parts.push(`${pending} pending`);
+  if (need) parts.push(`${need} ${need === 1 ? "needs" : "need"} you`);
+  return parts.length ? `Thread status · ${parts.join(" · ")}` : null;
+}
+
+/** @param {string} description @param {string | null} kind */
+export function criteriaLine(description, kind) {
+  const counted = acceptanceCriteria(description);
+  if (!counted || (counted.total === 0 && kind !== "story")) return null;
+  return `AC ${counted.done}/${counted.total}`;
+}
+
 export function sidebarRows(projects, tickets, live, activeProject, expanded, collapsed, frozen = []) {
   const byId = new Map(live.filter(t => !t.archivedAt && t.visibility !== "hidden").map(t => [t.id, t]));
   const linked = new Set(tickets.flatMap(t => t.links.map(l => l.threadId)));

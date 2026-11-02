@@ -1,7 +1,7 @@
 // @ts-check
 import { migrate, query, run, transaction } from "kagan/database";
 import * as threads from "kagan/threads";
-import { stage, text } from "./model.js";
+import { stage, text, KINDS, BUG_TEMPLATE, isGated, startProblem, acceptanceCriteria, daysInStage, rankFor, rankOrder, looksLikeUserStory, USER_STORY_WARNING } from "./model.js";
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -33,6 +33,14 @@ export function ready() {
     `CREATE TABLE linked_repo (project_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(project_id, repo))`,
     `CREATE TABLE unlinked_repo (project_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(project_id, repo))`,
     `CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+    `ALTER TABLE ticket ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind IN ('story', 'bug', 'task'))`,
+    `ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done' CHECK (resolution IN ('done', 'wont-do'))`,
+    `ALTER TABLE ticket ADD COLUMN stage_at INTEGER`,
+    `ALTER TABLE ticket ADD COLUMN rank REAL`,
+    `CREATE TABLE ticket_block (blocked_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, blocker_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, PRIMARY KEY (blocked_id, blocker_id))`,
+    `CREATE INDEX ticket_block_blocker ON ticket_block (blocker_id)`,
+    `CREATE TABLE board_rules (project_id TEXT PRIMARY KEY, age_warn_days INTEGER NOT NULL DEFAULT 14, wip_limit INTEGER)`,
+    `UPDATE ticket SET rank = (SELECT ordered.n FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY proposed DESC, (pending_stage IS NOT NULL) DESC, updated_at DESC, number) AS n FROM ticket WHERE stage = 'backlog') AS ordered WHERE ordered.id = ticket.id) WHERE stage = 'backlog' AND rank IS NULL`,
   ]);
 }
 
@@ -73,7 +81,14 @@ export async function kvJson(key, fallback) {
 }
 
 function ticket(row) {
-  return { id: String(row.id), projectId: String(row.project_id), number: Number(row.number), title: String(row.title), stage: String(row.stage), description: String(row.description), proposed: Boolean(row.proposed), pendingStage: row.pending_stage, parentId: row.parent_id, environmentId: row.environment_id, issue: row.issue_repo ? { repo: row.issue_repo, number: row.issue_number, url: row.issue_url } : null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+  return {
+    id: String(row.id), projectId: String(row.project_id), number: Number(row.number), title: String(row.title), stage: String(row.stage),
+    description: String(row.description), proposed: Boolean(row.proposed), pendingStage: row.pending_stage, parentId: row.parent_id, environmentId: row.environment_id,
+    issue: row.issue_repo ? { repo: row.issue_repo, number: row.issue_number, url: row.issue_url } : null,
+    kind: row.kind == null ? null : String(row.kind), resolution: row.resolution == null ? "done" : String(row.resolution),
+    stageAt: row.stage_at == null ? null : Number(row.stage_at), rank: row.rank == null ? null : Number(row.rank),
+    createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+  };
 }
 
 export async function ticketRow(id) {
@@ -113,6 +128,7 @@ export function board(projectIds) {
     const rows = await query("SELECT * FROM ticket", []);
     const links = await query("SELECT * FROM ticket_thread", []);
     const handoffs = await query("SELECT * FROM handoff", []);
+    const blocks = await query("SELECT blocked_id, blocker_id FROM ticket_block", []);
     const byId = new Map();
     for (const id of new Set([...links.map(l => String(l.thread_id))])) {
       try { byId.set(id, await threads.get(id)); } catch { /* Deleted threads are unlinked by events. */ }
@@ -121,8 +137,21 @@ export function board(projectIds) {
       const t = ticket(row);
       const own = links.filter(l => l.ticket_id === t.id);
       const live = own.map(l => byId.get(l.thread_id)).filter(t => t && t.archivedAt === null && t.visibility !== "hidden");
-      return { ...t, threads: live, links: own.map(l => ({ threadId: String(l.thread_id), persona: l.persona })), handoff: handoffs.find(h => h.ticket_id === t.id) ?? null, updatedAt: Math.max(t.updatedAt, ...live.map(t => t.updatedAt)) };
+      return { ...t, threads: live, links: own.map(l => ({ threadId: String(l.thread_id), persona: l.persona })), handoff: handoffs.find(h => h.ticket_id === t.id) ?? null, updatedAt: Math.max(t.updatedAt, ...live.map(t => t.updatedAt)), blockedBy: [], blocks: [] };
     });
+    const ticketById = new Map(tickets.map(t => [t.id, t]));
+    const refOf = (id) => {
+      const t = ticketById.get(String(id));
+      return t ? { id: t.id, number: t.number, title: t.title, stage: t.stage, projectId: t.projectId } : null;
+    };
+    for (const block of blocks) {
+      const blocked = ticketById.get(String(block.blocked_id));
+      const blocker = refOf(block.blocker_id);
+      const waiting = refOf(block.blocked_id);
+      if (blocked && blocker) blocked.blockedBy.push(blocker);
+      const blockerTicket = ticketById.get(String(block.blocker_id));
+      if (blockerTicket && waiting) blockerTicket.blocks.push(waiting);
+    }
     const linked = new Set(links.map(l => l.thread_id));
     const loose = [];
     for (const projectId of projectIds) for (const t of await threads.list({ projectId, archived: false })) {
@@ -135,7 +164,21 @@ export function board(projectIds) {
 export async function detail(id) {
   const own = await ticketRow(id);
   const data = await board([own.projectId]);
-  return { ...data.tickets.find(t => t.id === id), comments: await query("SELECT * FROM comment WHERE ticket_id = ? ORDER BY created_at, id", [id]), subTickets: data.tickets.filter(t => t.parentId === id) };
+  const found = data.tickets.find(t => t.id === id);
+  if (!found) throw new Error(`No ticket ${id}`);
+  const rules = await boardRules(found.projectId);
+  const days = found.stage === "in-progress" || found.stage === "review" ? daysInStage(found.stageAt) : null;
+  return {
+    ...found,
+    comments: await query("SELECT * FROM comment WHERE ticket_id = ? ORDER BY created_at, id", [id]),
+    subTickets: data.tickets.filter(t => t.parentId === id),
+    acceptanceCriteria: acceptanceCriteria(found.description),
+    startProblem: found.stage === "backlog" ? startProblem(found) : null,
+    daysInStage: days,
+    ageWarnDays: rules.ageWarnDays,
+    titleWarning: looksLikeUserStory(found.title) ? USER_STORY_WARNING : null,
+    wip: rules.wipLimit !== null ? { count: data.tickets.filter(t => t.stage === "in-progress").length, limit: rules.wipLimit } : null,
+  };
 }
 
 export function createTicket(input) { return serial(() => createTicketInner(input)); }
@@ -148,10 +191,21 @@ export async function createTicketInner(input) {
   if (input.threadId) await threads.get(input.threadId);
   const id = newId("tkt");
   const now = Date.now();
-  const description = input.description == null || input.description === ""
+  const kind = input.kind === undefined ? "story" : input.kind;
+  if (kind !== null && !KINDS.includes(kind)) throw new Error("Kind must be story, bug, or task");
+  let description = input.description == null || input.description === ""
     ? ""
     : text(String(input.description), "Description", 20_000);
-  const statements = [{ sql: `INSERT INTO ticket(id, project_id, number, title, stage, description, proposed, issue_repo, issue_number, issue_url, created_at, updated_at) SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM ticket WHERE project_id = ?`, params: [id, input.projectId, title, wanted, description, input.proposed ? 1 : 0, input.issue?.repo ?? null, input.issue?.number ?? null, input.issue?.url ?? null, now, now, input.projectId] }];
+  if (kind === "bug" && !description.trim()) description = BUG_TEMPLATE;
+  const statements = [{
+    sql: `INSERT INTO ticket(id, project_id, number, title, stage, description, proposed, issue_repo, issue_number, issue_url, created_at, updated_at, kind, stage_at, rank) SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'backlog' THEN COALESCE(MAX(rank), 0) + 1 ELSE NULL END FROM ticket WHERE project_id = ?`,
+    params: [id, input.projectId, title, wanted, description, input.proposed ? 1 : 0, input.issue?.repo ?? null, input.issue?.number ?? null, input.issue?.url ?? null, now, now, kind, now, wanted, input.projectId],
+  }];
+  for (const blockerId of input.blockerIds ?? []) {
+    const blocker = await ticketRow(blockerId);
+    if (blocker.projectId !== input.projectId) throw new Error("A blocker has to be a ticket in the same project");
+    statements.push({ sql: "INSERT INTO ticket_block (blocked_id, blocker_id) VALUES (?, ?)", params: [id, blocker.id] });
+  }
   if (input.threadId) statements.push({ sql: "INSERT INTO ticket_thread(thread_id, ticket_id, persona) VALUES (?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET ticket_id = excluded.ticket_id, persona = excluded.persona, archived_by_done = 0", params: [input.threadId, id, input.persona ?? null] });
   await transaction(statements);
   touch();
@@ -174,11 +228,15 @@ export function detach(threadId) {
 export function editTicket(id, fields) {
   return serial(async () => {
     const t = await ticketRow(id);
-    const description = fields.description === undefined
+    let description = fields.description === undefined
       ? t.description
       : (fields.description === "" ? "" : text(String(fields.description), "Description", 20_000));
-    await run("UPDATE ticket SET title = ?, description = ?, updated_at = ? WHERE id = ?", [text(fields.title ?? t.title, "Title"), description, Date.now(), id]);
+    const kind = fields.kind === undefined ? t.kind : fields.kind;
+    if (kind !== null && !KINDS.includes(kind)) throw new Error("Kind must be story, bug, or task");
+    if (fields.kind === "bug" && !description.trim()) description = BUG_TEMPLATE;
+    await run("UPDATE ticket SET title = ?, description = ?, kind = ?, updated_at = ? WHERE id = ?", [text(fields.title ?? t.title, "Title"), description, kind, Date.now(), id]);
     touch();
+    return ticketRow(id);
   });
 }
 
@@ -189,17 +247,28 @@ export function dismissTicket(id) {
   return serial(async () => { await ticketRow(id); await run("DELETE FROM ticket WHERE id = ? AND proposed = 1", [id]); touch(); });
 }
 export function proposeMove(id, wanted) {
-  return serial(async () => { await ticketRow(id); await run("UPDATE ticket SET pending_stage = ? WHERE id = ?", [stage(wanted), id]); touch(); });
+  return serial(async () => {
+    const t = await ticketRow(id);
+    const next = stage(wanted);
+    const problem = isGated(t.stage, next, "done") ? startProblem(t) : null;
+    if (problem) throw new Error(`Can't start #${t.number}: ${problem}.`);
+    await run("UPDATE ticket SET pending_stage = ? WHERE id = ?", [next, id]);
+    touch();
+  });
 }
 export function dismissMove(id) {
   return serial(async () => { await ticketRow(id); await run("UPDATE ticket SET pending_stage = NULL WHERE id = ?", [id]); touch(); });
 }
 
-export function moveTicket(id, wanted) {
+export function moveTicket(id, wanted, resolution = "done") {
   return serial(async () => {
     stage(wanted);
+    if (resolution !== "done" && resolution !== "wont-do") throw new Error("Unknown resolution");
+    if (resolution === "wont-do" && wanted !== "done") throw new Error("Won't do only applies to a move to Done");
     const t = await ticketRow(id);
     if (t.proposed) throw new Error("Accept the proposed ticket first");
+    const problem = isGated(t.stage, wanted, resolution) ? startProblem(t) : null;
+    if (problem) throw new Error(`Can't start #${t.number}: ${problem}.`);
     const links = await query("SELECT * FROM ticket_thread WHERE ticket_id = ?", [id]);
     if (wanted === "done" && t.stage !== "done") {
       for (const link of links) {
@@ -223,9 +292,22 @@ export function moveTicket(id, wanted) {
       }
       await run("UPDATE ticket_thread SET archived_by_done = 0 WHERE ticket_id = ?", [id]);
     }
-    await run("UPDATE ticket SET stage = ?, pending_stage = NULL, updated_at = ? WHERE id = ?", [wanted, Date.now(), id]);
+    const now = Date.now();
+    const kept = wanted === "done" ? resolution : "done";
+    await run(`UPDATE ticket SET stage_at = CASE WHEN stage = ? THEN stage_at ELSE ? END, stage = ?, resolution = ?, pending_stage = NULL, rank = CASE WHEN ? = 'backlog' AND rank IS NULL THEN (SELECT COALESCE(MAX(other.rank), 0) + 1 FROM ticket other WHERE other.project_id = ticket.project_id) ELSE rank END, updated_at = ? WHERE id = ?`, [wanted, now, wanted, kept, wanted, now, id]);
     touch();
-    return ticketRow(id);
+    const moved = await ticketRow(id);
+    const notes = [];
+    if (wanted === "in-progress") {
+      const names = (await query("SELECT t.number FROM ticket t JOIN ticket_block b ON b.blocker_id = t.id WHERE b.blocked_id = ? AND t.stage != 'done' ORDER BY t.number", [id])).map(row => `#${row.number}`);
+      if (names.length) notes.push(`Still blocked by ${names.join(", ")}`);
+      const rules = await boardRules(moved.projectId);
+      if (rules.wipLimit !== null) {
+        const count = Number((await query("SELECT COUNT(*) AS n FROM ticket WHERE project_id = ? AND stage = 'in-progress'", [moved.projectId]))[0].n);
+        if (count > rules.wipLimit) notes.push(`In progress now holds ${count} tickets, over this project's limit of ${rules.wipLimit}. Finish one before starting another.`);
+      }
+    }
+    return notes.length ? { ...moved, warning: notes.join("\n") } : moved;
   });
 }
 
@@ -241,6 +323,78 @@ export function setParent(id, parentId) {
     }
     await run("UPDATE ticket SET parent_id = ? WHERE id = ?", [parentId, id]);
     touch();
+  });
+}
+
+async function waitsOn(startId, targetId) {
+  const rows = await query(`WITH RECURSIVE up(id) AS (SELECT ? UNION SELECT b.blocker_id FROM ticket_block b JOIN up ON b.blocked_id = up.id) SELECT id FROM up WHERE id = ?`, [startId, targetId]);
+  return rows.length > 0;
+}
+
+export function blockTicket(id, blockerId) {
+  return serial(async () => {
+    const t = await ticketRow(id);
+    const blocker = await ticketRow(blockerId);
+    if (t.proposed || blocker.proposed) throw new Error("Accept the tickets before linking a blocker");
+    if (t.projectId !== blocker.projectId) throw new Error("A blocker has to be a ticket in the same project");
+    if (t.id === blocker.id) throw new Error("A ticket can't block itself");
+    if (await waitsOn(blocker.id, t.id)) throw new Error(`#${blocker.number} is already blocked by #${t.number}`);
+    await run("INSERT OR IGNORE INTO ticket_block (blocked_id, blocker_id) VALUES (?, ?)", [t.id, blocker.id]);
+    touch();
+  });
+}
+
+export function unblockTicket(id, blockerId) {
+  return serial(async () => {
+    await ticketRow(id);
+    const blocker = await ticketRow(blockerId);
+    await run("DELETE FROM ticket_block WHERE blocked_id = ? AND blocker_id = ?", [id, blocker.id]);
+    touch();
+  });
+}
+
+export function rankTicket(id, place) {
+  return serial(async () => {
+    const t = await ticketRow(id);
+    if (t.stage !== "backlog") throw new Error(`#${t.number} is in ${t.stage}. Only Backlog has an order to change.`);
+    const anchorId = place.before ?? place.after ?? null;
+    if (anchorId) {
+      const anchor = await ticketRow(anchorId);
+      if (anchor.id === t.id) throw new Error("A ticket can't be ranked against itself.");
+      if (anchor.projectId !== t.projectId) throw new Error(`#${anchor.number} is in another project. Only tickets of one project are ranked against each other.`);
+      if (anchor.stage !== "backlog") throw new Error(`#${anchor.number} is in ${anchor.stage}, not Backlog.`);
+    }
+    const others = async () => (await query("SELECT id, rank, number FROM ticket WHERE project_id = ? AND stage = 'backlog' AND id != ?", [t.projectId, id]))
+      .map(row => ({ id: String(row.id), rank: row.rank == null ? null : Number(row.rank), number: Number(row.number) }))
+      .sort(rankOrder);
+    let rank = rankFor(await others(), place);
+    if (rank === null) {
+      const list = await others();
+      await transaction(list.map((item, index) => ({ sql: "UPDATE ticket SET rank = ? WHERE id = ?", params: [index + 1, item.id] })));
+      rank = rankFor(await others(), place);
+    }
+    await run("UPDATE ticket SET rank = ? WHERE id = ?", [rank, id]);
+    touch();
+    return ticketRow(id);
+  });
+}
+
+export async function boardRules(projectId) {
+  await ready();
+  const rows = await query("SELECT age_warn_days, wip_limit FROM board_rules WHERE project_id = ?", [projectId]);
+  if (!rows.length) return { ageWarnDays: 14, wipLimit: null };
+  return { ageWarnDays: Number(rows[0].age_warn_days), wipLimit: rows[0].wip_limit == null ? null : Number(rows[0].wip_limit) };
+}
+
+export function setBoardRules(projectId, rules) {
+  return serial(async () => {
+    const current = await boardRules(projectId);
+    const next = { ...current, ...rules };
+    if (!Number.isInteger(next.ageWarnDays) || next.ageWarnDays < 1 || next.ageWarnDays > 365) throw new Error("Warning days must be a whole number from 1 to 365");
+    if (next.wipLimit !== null && (!Number.isInteger(next.wipLimit) || next.wipLimit < 1 || next.wipLimit > 999)) throw new Error("Work-in-progress limit must be a whole number from 1 to 999, or off");
+    await run("INSERT INTO board_rules (project_id, age_warn_days, wip_limit) VALUES (?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET age_warn_days = excluded.age_warn_days, wip_limit = excluded.wip_limit", [projectId, next.ageWarnDays, next.wipLimit]);
+    touch();
+    return next;
   });
 }
 
@@ -270,6 +424,7 @@ export function deleteTicket(id) {
       const t = await threads.get(String(link.thread_id)).catch(() => null);
       if (t && t.archivedAt === null) await threads.archive(t.id);
     }
+    await run("DELETE FROM ticket_block WHERE blocked_id = ? OR blocker_id = ?", [id, id]);
     await run("DELETE FROM ticket WHERE id = ?", [id]);
     touch();
   });

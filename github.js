@@ -35,7 +35,7 @@ export async function listIssues(projectId, options = {}) {
   const filters = [];
   for (const field of ["label", "assignee", "author"]) if (options[field]) filters.push(`--${field}`, options[field]);
   if (repos.length && options.query?.trim()) {
-    const found = JSON.parse(await gh(["search", "issues", options.query.trim(), "--state", "open", ...repos.flatMap(repo => ["--repo", repo]), ...filters, "--limit", "50", "--json", "number,title,repository,url,labels,assignees,author"]));
+    const found = JSON.parse(await gh(["search", "issues", `${options.query.trim()} is:issue`, "--state", "open", ...repos.flatMap(repo => ["--repo", repo]), ...filters, "--limit", "50", "--json", "number,title,repository,url,labels,assignees,author"]));
     for (const issue of found) issues.push({ ...issue, repo: issue.repository.nameWithOwner });
   } else for (const repo of repos) {
     const found = JSON.parse(await gh(["issue", "list", "--repo", repo, "--state", "open", ...filters, "--limit", "100", "--json", "number,title,url,labels,assignees,author"]));
@@ -51,7 +51,7 @@ export function importIssue(projectId, repo, number) {
     if (!Number.isSafeInteger(number) || number < 1) throw new Error("Issue number must be a positive integer");
     if ((await query("SELECT id FROM ticket WHERE project_id = ? AND issue_repo = ? COLLATE NOCASE AND issue_number = ?", [projectId, repo, number])).length) throw new Error("That issue is already on this board");
     const issue = JSON.parse(await gh(["issue", "view", String(number), "--repo", repo, "--json", "title,body,url,comments"]));
-    const t = await store.createTicketInner({ projectId, title: String(issue.title).slice(0, 200), description: `${issue.body ?? ""}\n\n---\nCopy of ${issue.url}. Nothing syncs back to GitHub.`, issue: { repo, number, url: issue.url } });
+    const t = await store.createTicketInner({ projectId, title: String(issue.title).slice(0, 200), description: `${issue.body ?? ""}\n\n---\nCopy of ${issue.url}. Nothing syncs back to GitHub.`, issue: { repo, number, url: issue.url }, kind: null });
     for (const comment of issue.comments ?? []) if (comment.body?.trim()) await store.addCommentInner(t.id, { body: comment.body, githubLogin: comment.author?.login ?? "unknown" });
     return t;
   });
