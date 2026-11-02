@@ -4,6 +4,7 @@ export const STAGES = ["backlog", "in-progress", "review", "done"];
 export const TITLES = { backlog: "Backlog", "in-progress": "In progress", review: "Review", done: "Done" };
 export const PERSONAS = { backlog: "intake", "in-progress": "implementer", review: "reviewer-default", done: "ship" };
 export const GLYPHS = { backlog: "◌", "in-progress": "◐", review: "⊙", done: "●" };
+export const NEXT = { backlog: "in-progress", "in-progress": "review", review: "done", done: null };
 
 export function stage(value) {
   if (!STAGES.includes(value)) throw new Error(`Unknown stage ${value}`);

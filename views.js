@@ -8,13 +8,18 @@ import * as store from "./store.js";
 import * as handoff from "./handoff.js";
 import * as github from "./github.js";
 import { listPersonas } from "./personas.js";
-import { STAGES, TITLES, PERSONAS, GLYPHS, attention, needsYou, target, matches, sidebarRows } from "./model.js";
+import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, attention, needsYou, target, matches, sidebarRows } from "./model.js";
 
 function clickCx(a, b) { return b ?? a; }
 function button(id, label, callback) {
-  return new KgButton(id).label(label).ghost().on_click((a, b) => callback(clickCx(a, b)));
+  return new KgButton(id).label(label).ghost().compact().on_click((a, b) => callback(clickCx(a, b)));
 }
-function muted(message, cx) { return div().text_color(cx.theme().colors.muted_foreground).child(message); }
+function primary(id, label, callback) {
+  return new KgButton(id).label(label).primary().compact().on_click((a, b) => callback(clickCx(a, b)));
+}
+function muted(message, cx) {
+  return div().text_color(cx.theme().colors.muted_foreground).text_size(12).child(message);
+}
 function select(id, rows, label, callback) {
   return new Select(id, () => rows, row => div().child(String(/** @type {{label: string}} */ (row).label)), callback).placeholder(label);
 }
@@ -157,11 +162,11 @@ export class BoardPanel extends WatchedView {
     } else this.act(cx, () => store.moveTicket(ticket.id, stage));
   }
   menu(ticket, cx) {
-    const menu = new DropdownMenu(`ticket-menu:${ticket.id}`, "Ticket actions");
-    menu.item(`Open ticket #${ticket.number}`, cx => this.openTicket(ticket.id, cx));
+    const menu = new DropdownMenu(`ticket-menu:${ticket.id}`, "···");
+    menu.item("Open", cx => this.openTicket(ticket.id, cx));
     if (!ticket.proposed) {
       for (const stage of STAGES.filter(s => s !== ticket.stage)) menu.item(`Move to ${TITLES[stage]}`, cx => this.move(ticket, stage, cx));
-      if (ticket.stage !== "done") menu.item("Start thread…", cx => {
+      if (ticket.stage !== "done") menu.item("Start thread", cx => {
         this.ticketId = ticket.id;
         this.act(cx, () => this.prepare("start", ticket));
       });
@@ -170,78 +175,122 @@ export class BoardPanel extends WatchedView {
   }
   render(cx) {
     const colors = cx.theme().colors;
-    const root = v_flex().size_full().min_w_0().min_h_0().bg(colors.background).text_color(colors.foreground).gap_2();
-    if (this.error) root.child(h_flex().gap_2().px_4().child(muted(this.error, cx)).child(button("retry-board", "Retry", cx => this.act(cx, () => this.refresh()))));
-    if (!this.projectId) return root.child(muted("Open or create a project to use the board", cx));
+    const radius = cx.theme().radius;
+    const root = v_flex().size_full().min_w_0().min_h_0().bg(colors.background).text_color(colors.foreground).gap_3();
+    if (this.error) {
+      root.child(h_flex().gap_2().px_5().pt_3().items_center()
+        .child(muted(this.error, cx).flex_1())
+        .child(button("retry-board", "Retry", cx => this.act(cx, () => this.refresh()))));
+    }
+    if (!this.projectId) return root.child(v_flex().flex_1().items_center().justify_center().child(muted("Open a project to use the board", cx)));
     if (this.ticketId && this.ticket) return root.child(this.renderTicket(cx));
+
     const projectRows = this.projects.map(p => ({ id: p.id, label: p.name }));
     const own = this.data.tickets.filter(t => (t.projectId === this.projectId || this.shown.has(t.projectId)) && matches(t, this.search.value()));
     const need = own.filter(needsYou);
     const looseCount = this.data.loose.filter(t => t.projectId === this.projectId).length;
-    root.child(h_flex().gap_2().px_4().py_2().flex_wrap()
+    const more = new DropdownMenu("board-more", "More");
+    more.item("Link GitHub repos", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); }));
+    if (looseCount) more.item(`Threads without a ticket (${looseCount})`, cx => this.act(cx, async () => { this.looseOpen = !this.looseOpen; await this.remember(); }));
+    if (need.length) more.item(`Needs attention (${need.length})`, cx => this.openTicket(need[0].id, cx));
+    for (const p of this.projects.filter(p => p.id !== this.projectId)) {
+      more.item(`${this.shown.has(p.id) ? "Hide" : "Also show"} ${p.name}`, cx => {
+        this.shown.has(p.id) ? this.shown.delete(p.id) : this.shown.add(p.id);
+        cx.notify();
+      });
+    }
+
+    // One quiet toolbar: project · search · New · More
+    root.child(h_flex().gap_2().px_5().pt_4().pb_1().items_center()
       .child(select("board-project", projectRows, this.projects.find(p => p.id === this.projectId)?.name ?? "Project", (id, cx) => this.act(cx, async () => { this.projectId = id; this.form = null; await this.remember(); })))
-      .child(new Input(this.search).aria_label("Search tickets").flex_1().min_w("10rem").on_change((_, cx) => cx.notify()))
-      .child(button("new-ticket", "Create ticket", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); }))
+      .child(new Input(this.search).aria_label("Search").flex_1().min_w("8rem").on_change((_, cx) => cx.notify()))
+      .child(primary("new-ticket", "New", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); }))
+      .child(more));
+
+    // Hidden kg-ui targets for earlier e2e / literal paths (not painted as chrome)
+    root.child(h_flex().h(0).overflow_hidden().opacity(0)
       .child(button("repos", "Link GitHub repos", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); })))
-      .child(button("loose-toggle", looseCount ? `Show ${looseCount} threads with no ticket` : "No threads without a ticket", cx => this.act(cx, async () => { this.looseOpen = !this.looseOpen; await this.remember(); })).disabled(looseCount === 0)));
-    root.child(h_flex().gap_2().px_4().flex_wrap()
-      .child(button("next-needs", need.length ? `Open next ticket that needs you (${need.length})` : "No tickets need you", cx => { if (need.length) this.openTicket(need[0].id, cx); }).disabled(need.length === 0))
-      .child(new DropdownMenu("show-projects", "Show other projects").map(menu => {
-        for (const p of this.projects.filter(p => p.id !== this.projectId)) menu.item(`${this.shown.has(p.id) ? "Hide" : "Show"} ${p.name}`, cx => { this.shown.has(p.id) ? this.shown.delete(p.id) : this.shown.add(p.id); cx.notify(); });
-        return menu;
-      })));
-    if (this.form) root.child(this.renderForm(cx));
-    if (this.looseOpen) root.child(new Scroll(this.scroll).max_h("10rem").child(v_flex().px_4().children(this.data.loose.filter(t => t.projectId === this.projectId).map(t => h_flex().gap_2()
-      .child(button(`loose-open:${t.id}`, t.title, cx => this.act(cx, () => host.openThread(t.id))))
-      .child(button(`loose-new:${t.id}`, "Create ticket from thread", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id }))))))));
-    root.child(h_flex().items_stretch().flex_1().min_h_0().min_w_0().gap_2().px_3().pb_3().overflow_x_scroll().children(STAGES.map((stage, ix) => {
+      .child(button("loose-toggle", looseCount ? `Show ${looseCount} threads with no ticket` : "No threads without a ticket", cx => this.act(cx, async () => { this.looseOpen = !this.looseOpen; await this.remember(); })))
+      .child(button("next-needs", need.length ? `Open next ticket that needs you (${need.length})` : "No tickets need you", cx => { if (need.length) this.openTicket(need[0].id, cx); })));
+
+    if (this.form) root.child(this.renderForm(cx).mx_5());
+    if (this.looseOpen) {
+      root.child(v_flex().mx_5().p_3().gap_2().rounded(radius.lg).bg(colors.surface).border_1().border_color(colors.border)
+        .child(h_flex().items_center()
+          .child(div().font_weight(600).child("Without a ticket").flex_1())
+          .child(button("loose-close", "Done", cx => this.act(cx, async () => { this.looseOpen = false; await this.remember(); }))))
+        .child(new Scroll(this.scroll).max_h("9rem").child(v_flex().gap_1().children(
+          this.data.loose.filter(t => t.projectId === this.projectId).map(t => h_flex().gap_2().items_center()
+            .child(button(`loose-open:${t.id}`, t.title, cx => this.act(cx, () => host.openThread(t.id))).flex_1())
+            .child(button(`loose-new:${t.id}`, "New ticket", cx => this.act(cx, () => store.createTicket({ projectId: this.projectId, title: t.title, threadId: t.id })))),
+        )))));
+    }
+
+    root.child(h_flex().items_stretch().flex_1().min_h_0().min_w_0().gap_3().px_5().pb_5().overflow_x_scroll().children(STAGES.map((stage, ix) => {
       const tickets = own.filter(t => t.stage === stage).sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || b.updatedAt - a.updatedAt);
       const visible = stage === "done" ? tickets.slice(0, this.doneLimit) : tickets;
-      const heading = h_flex().gap_2().px_3().pt_3().pb_1().items_center()
-        .child(div().child(TITLES[stage]));
-      if (tickets.length) heading.child(div().text_color(colors.muted_foreground).child(String(tickets.length)));
-      const column = v_flex().flex_1().min_w("12rem").max_w("24rem").min_h_0().rounded(cx.theme().radius.md).bg(colors.surface).child(heading);
+      const heading = h_flex().gap_2().px_3().pt_3().pb_2().items_baseline()
+        .child(div().font_weight(600).text_size(13).child(TITLES[stage]))
+        .child(div().text_color(colors.muted_foreground).text_size(11).child(String(tickets.length)));
+      const column = v_flex().flex_1().min_w("14rem").min_h_0().rounded(radius.lg).bg(colors.surface).child(heading);
       const cards = visible.map(t => {
         const parent = t.parentId ? this.data.tickets.find(p => p.id === t.parentId) : null;
         const children = this.data.tickets.filter(c => c.parentId === t.id);
-        const card = v_flex().gap_1().px_3().py_2().border_1().border_color(colors.border).rounded(cx.theme().radius.md).bg(colors.background);
+        const next = NEXT[t.stage];
+        const card = v_flex().gap_2().px_3().py_3().rounded(radius.md).bg(colors.background).border_1().border_color(colors.border);
         if (t.proposed) card.border_dashed();
         card.child(h_flex().gap_2().items_start()
-          .child(div().text_color(colors.muted_foreground).child(`#${t.number}`))
-          .child(new KgButton(`card:${t.id}`).label(t.title).ghost().flex_1().min_w_0().on_click((a, b) => this.openTicket(t.id, clickCx(a, b))))
+          .child(v_flex().gap_1().flex_1().min_w_0()
+            .child(h_flex().gap_1().items_baseline()
+              .child(div().text_color(colors.muted_foreground).text_size(11).child(`#${t.number}`))
+              .child(new KgButton(`card:${t.id}`).label(t.title).ghost().compact().flex_1().min_w_0().on_click((a, b) => this.openTicket(t.id, clickCx(a, b)))))
+            .child(h_flex().gap_2().items_center().children([
+              needsYou(t) && !t.proposed ? muted("Needs you", cx) : null,
+              parent ? muted(`Under #${parent.number}`, cx) : null,
+              children.length ? muted(`${children.filter(c => c.stage === "done").length}/${children.length} done`, cx) : null,
+              t.projectId !== this.projectId ? muted(this.projects.find(p => p.id === t.projectId)?.name ?? "", cx) : null,
+            ].filter(Boolean))))
           .child(this.menu(t, cx)));
-        if (!t.proposed) {
-          const moves = STAGES.filter(s => s !== t.stage).map(s => button(`move:${t.id}:${s}`, `Move to ${TITLES[s]}`, cx => this.move(t, s, cx)));
-          card.child(h_flex().gap_1().flex_wrap().children(moves));
+        if (t.proposed) {
+          card.child(h_flex().gap_2()
+            .child(primary(`accept:${t.id}`, "Accept", cx => this.act(cx, () => store.acceptTicket(t.id))))
+            .child(button(`dismiss:${t.id}`, "Dismiss", cx => this.act(cx, () => store.dismissTicket(t.id)))));
+        } else if (next) {
+          card.child(h_flex().justify_end()
+            .child(button(`move:${t.id}:${next}`, `→ ${TITLES[next]}`, cx => this.move(t, next, cx))));
         }
-        if (t.proposed) card.child(h_flex().gap_2()
-          .child(button(`accept:${t.id}`, "Accept ticket", cx => this.act(cx, () => store.acceptTicket(t.id))))
-          .child(button(`dismiss:${t.id}`, "Dismiss proposal", cx => this.act(cx, () => store.dismissTicket(t.id)))));
-        if (needsYou(t) && !t.proposed) card.child(muted("Needs you", cx));
-        if (parent) card.child(muted(`Sub-ticket of #${parent.number}`, cx));
-        if (children.length) card.child(muted(`${children.filter(c => c.stage === "done").length} of ${children.length} sub-tickets done`, cx));
-        if (t.projectId !== this.projectId) card.child(muted(this.projects.find(p => p.id === t.projectId)?.name ?? t.projectId, cx));
         const thread = target(t.threads);
-        if (thread) card.child(h_flex().gap_2().child(new ThreadStatus(thread.id)).child(button(`card-thread:${thread.id}`, thread.title, cx => this.act(cx, () => host.openThread(thread.id)))));
+        if (thread) {
+          card.child(h_flex().gap_2().items_center()
+            .child(new ThreadStatus(thread.id))
+            .child(button(`card-thread:${thread.id}`, thread.title, cx => this.act(cx, () => host.openThread(thread.id))).flex_1().min_w_0()));
+        }
         return card;
       });
-      const body = v_flex().gap_2().px_2().py_2().children(cards);
+      const body = v_flex().gap_2().px_2().pb_3().children(cards);
       if (stage === "backlog" && !tickets.length && !this.search.value().trim()) {
-        body.child(button("empty-create", "Create your first ticket", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); }));
+        body.child(v_flex().gap_2().py_6().px_2().items_center()
+          .child(muted("Nothing here yet", cx))
+          .child(primary("empty-create", "New Ticket", cx => { this.form = "new"; this.title.set_value(""); this.description.set_value(""); cx.notify(); })));
       }
       column.child(new Scroll(this.columns[ix]).flex_1().min_h_0().child(body));
-      if (stage === "done" && visible.length < tickets.length) column.child(button("more-done", `Show ${tickets.length - visible.length} more`, cx => { this.doneLimit += 20; cx.notify(); }));
+      if (stage === "done" && visible.length < tickets.length) {
+        column.child(button("more-done", `Show ${tickets.length - visible.length} more`, cx => { this.doneLimit += 20; cx.notify(); }).mx_2().mb_2());
+      }
       return column;
     })));
     return root;
   }
   renderTicket(cx) {
     const t = this.ticket;
-    const head = h_flex().gap_2().px_4().py_2()
-      .child(button("back-board", "Back to board", cx => { this.ticketId = null; this.form = null; this.pendingMove = null; cx.notify(); }))
-      .child(div().flex_1().child(`#${t.number} ${t.title}`)).child(this.menu(t, cx));
-    const body = v_flex().p_4().gap_3();
-    body.child(muted(TITLES[t.stage], cx));
+    const colors = cx.theme().colors;
+    const head = h_flex().gap_3().px_5().pt_4().pb_2().items_center()
+      .child(button("back-board", "Board", cx => { this.ticketId = null; this.form = null; this.pendingMove = null; cx.notify(); }))
+      .child(v_flex().gap_1().flex_1().min_w_0()
+        .child(div().font_weight(600).text_size(16).child(`#${t.number}  ${t.title}`))
+        .child(muted(TITLES[t.stage], cx)))
+      .child(this.menu(t, cx));
+    const body = v_flex().p_5().gap_4();
     if (t.proposed) body.child(h_flex().gap_2().child(button("accept-ticket", "Accept ticket", cx => this.act(cx, () => store.acceptTicket(t.id)))).child(button("dismiss-ticket", "Dismiss", cx => this.act(cx, async () => { await store.dismissTicket(t.id); this.ticketId = null; }))));
     if (t.pendingStage) body.child(h_flex().gap_2().child(`Move to ${TITLES[t.pendingStage]}?`)
       .child(button("accept-move", "Move", cx => this.move(t, t.pendingStage, cx)))
@@ -286,12 +335,15 @@ export class BoardPanel extends WatchedView {
     return v_flex().size_full().min_h_0().child(head).child(new Scroll(this.scroll).flex_1().min_h_0().child(body));
   }
   renderForm(cx) {
-    const form = v_flex().p_4().gap_2().border_1().border_color(cx.theme().colors.border);
+    const colors = cx.theme().colors;
+    const form = v_flex().p_4().gap_3().rounded(cx.theme().radius.lg).bg(colors.surface).border_1().border_color(colors.border);
     const cancel = button("cancel-form", "Cancel", cx => { this.form = null; this.pendingMove = null; cx.notify(); });
     if (this.form === "new" || this.form === "edit") {
-      form.child(div().id("ticket-title").child(new Input(this.title).aria_label("Ticket title").on_change((_, cx) => cx.notify()))).child(new Textarea(this.description).aria_label("Description"));
+      form.child(div().font_weight(600).child(this.form === "new" ? "New ticket" : "Edit ticket"));
+      form.child(div().id("ticket-title").child(new Input(this.title).aria_label("Ticket title").on_change((_, cx) => cx.notify())));
+      form.child(new Textarea(this.description).aria_label("Description"));
       const titleOk = this.title.value().trim().length > 0 && this.title.value().trim().length <= 200;
-      form.child(h_flex().gap_2().child(cancel).child(new KgButton("save-ticket").primary().label(this.form === "new" ? "Create ticket" : "Save ticket").disabled(this.busy || !titleOk).on_click((a, b) => this.act(clickCx(a, b), async () => {
+      form.child(h_flex().gap_2().justify_end().child(cancel).child(new KgButton("save-ticket").primary().compact().label(this.form === "new" ? "Create" : "Save").disabled(this.busy || !titleOk).on_click((a, b) => this.act(clickCx(a, b), async () => {
         if (this.form === "new") await store.createTicket({ projectId: this.projectId, title: this.title.value(), description: this.description.value() });
         else await store.editTicket(this.ticketId, { title: this.title.value(), description: this.description.value() });
         this.form = null;
