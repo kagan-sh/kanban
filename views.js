@@ -400,7 +400,7 @@ export class BoardPanel extends WatchedView {
       }
       if (stage === "backlog" && !this.search.value().trim()) {
         if (this.composerOpen) {
-          body.child(new Input(this.composer).aria_label("New ticket title").track_focus(this.composerFocus).mx_2()
+          body.child(div().mx_2()
             .on_key_down((event, cx) => {
               if (event.key !== "escape") return;
               this.composerOpen = false;
@@ -408,7 +408,8 @@ export class BoardPanel extends WatchedView {
               this.refocusComposer = false;
               cx.stop_propagation();
               cx.notify();
-            }));
+            })
+            .child(new Input(this.composer).aria_label("New ticket title").track_focus(this.composerFocus)));
         } else {
           body.child(button("new-ticket", "New ticket", cx => {
             this.composerOpen = true;

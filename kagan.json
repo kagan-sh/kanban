@@ -5,7 +5,7 @@
   "kagan": ">=0.1.0",
   "entry": "main.js",
   "icon": "icons/board.svg",
-    "instructions": "Kanban is a ticket board over kagan threads. Read your ticket with kg kanban ticket show before working. Never create tickets unprompted. New tickets are stories; pass --kind bug or task. A story needs a ## Acceptance criteria checklist, and a bug needs Steps to reproduce, Expected, and Actual, before it leaves Backlog. Move with kg kanban move <stage>; Done archives threads and requires the setting that allows it. kg kanban move done --wont-do ends the ticket without those checks. Rank Backlog with kg kanban ticket rank. Write a ## Handoff as a ticket comment when handing work to a new thread.",
+    "instructions": "Kanban is a ticket board over kagan threads. Read your ticket with kg kanban ticket show before working. Never create tickets unprompted. New tickets are stories; pass --kind bug or task. A story needs a ## Acceptance criteria checklist, and a bug needs Steps to reproduce, Expected, and Actual, before it leaves Backlog. Move with kg kanban move <stage>; Done archives threads and requires the setting that allows it. When moves apply immediately, kg kanban move done --wont-do ends the ticket without those checks. When moves wait for approval, that command is refused: a proposal cannot carry won't do, so run kg kanban move done and tell the person to pick Won't do. Rank Backlog with kg kanban ticket rank. Write a ## Handoff as a ticket comment when handing work to a new thread.",
   "powers": {
     "run": [{ "program": "gh" }, { "program": "git" }],
     "areas": ["threads", "database", "process"]

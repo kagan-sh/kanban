@@ -53,10 +53,7 @@ export async function execute(job) {
     if (wanted === "done" && settings().agentMoveToDone !== true) throw new Error("Agents can move tickets to Done is off");
     const t = await store.resolveTicket(args[1], context);
     if (job.threadId && settings().agentAutoApproveMoves === false) {
-      if (flags["wont-do"]) {
-        await store.proposeMove(t.id, "done");
-        return { proposed: true, stage: "done", note: "Won't do cannot be proposed. This proposes Done; pick won't do when you accept the move." };
-      }
+      if (flags["wont-do"]) throw new Error("Won't do cannot be proposed while moves wait for approval. Run `kg kanban move done` and tell the person to pick Won't do when they accept.");
       await store.proposeMove(t.id, wanted);
       return { proposed: true, stage: wanted };
     }
