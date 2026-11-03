@@ -8,7 +8,7 @@ import * as store from "./store.js";
 import * as handoff from "./handoff.js";
 import * as github from "./github.js";
 import { listPersonas } from "./personas.js";
-import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, needsYou, matches, sidebarRows, AGE_WARN_DAYS, startProblem, daysInStage, sortColumn, openBlockers, canBlock, subTicketLine, threadStatusLine, criteriaLine, rankOrder, looksLikeUserStory, USER_STORY_WARNING, KINDS, dropOnCard, dropOnColumn, dropOnLoose, threadMatches, planMove, pendingMoveControls, moveWarning } from "./model.js";
+import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, needsYou, matches, sidebarRows, AGE_WARN_DAYS, startProblem, daysInStage, sortColumn, openBlockers, canBlock, subTicketLine, threadStatusLine, criteriaLine, rankOrder, looksLikeUserStory, USER_STORY_WARNING, KINDS, dropOnCard, dropOnColumn, dropOnLoose, threadMatches, planMove, pendingMoveControls, moveWarning, descriptionPreview, commentWhen } from "./model.js";
 
 function clickCx(a, b) { return b ?? a; }
 function button(id, label, callback) {
@@ -617,6 +617,8 @@ export class BoardPanel extends WatchedView {
         .children(blockers.map(b => button(`blocked:${t.id}:${b.id}`, `#${b.number} ${b.title}`, cx => this.openTicket(b.id, cx)))));
     }
     if (t.proposed) {
+      const preview = descriptionPreview(t.description);
+      if (preview) card.child(muted(preview, cx));
       card.child(h_flex().gap_2()
         .child(primary(`accept:${t.id}`, "Accept", cx => this.act(cx, () => store.acceptTicket(t.id))))
         .child(button(`dismiss:${t.id}`, "Dismiss", cx => this.act(cx, () => store.dismissTicket(t.id)))));
@@ -721,10 +723,17 @@ export class BoardPanel extends WatchedView {
       .child(button(`unsub:${child.id}`, "Remove", cx => this.act(cx, () => store.setParent(child.id, null)))));
     if (this.form) body.child(this.renderForm(cx));
     body.child(div().child("Comments"));
-    for (const comment of t.comments) body.child(v_flex().gap_2().child(muted(comment.github_login ?? comment.persona ?? comment.thread_id ?? "You", cx)).child(new Markdown(comment.id, comment.body))
-      .child(new DropdownMenu(`comment:${comment.id}`, "Comment actions")
-        .item("Edit…", cx => { this.editCommentId = comment.id; this.comment.set_value(comment.body); cx.notify(); })
-        .item("Delete", cx => this.act(cx, () => store.deleteComment(comment.id)))));
+    for (const comment of t.comments) {
+      const who = comment.github_login ?? comment.persona ?? comment.thread_id ?? "You";
+      const when = commentWhen(comment.created_at);
+      const head = h_flex().gap_2().items_baseline().child(muted(who, cx));
+      if (when) head.child(muted(when, cx));
+      if (comment.updated_at !== comment.created_at) head.child(muted("· edited", cx));
+      body.child(v_flex().gap_2().child(head).child(new Markdown(comment.id, comment.body))
+        .child(new DropdownMenu(`comment:${comment.id}`, "Comment actions")
+          .item("Edit…", cx => { this.editCommentId = comment.id; this.comment.set_value(comment.body); cx.notify(); })
+          .item("Delete", cx => this.act(cx, () => store.deleteComment(comment.id)))));
+    }
     body.child(new Textarea(this.comment).aria_label(this.editCommentId ? "Edit comment" : "Add comment"));
     body.child(button("save-comment", this.editCommentId ? "Save comment" : "Add comment", cx => this.act(cx, async () => {
       if (this.editCommentId) await store.editComment(this.editCommentId, this.comment.value());
