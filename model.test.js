@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   canNest, commentWhen, descriptionPreview, dropOnCard, dropOnColumn, dropOnLoose, failInterruptedHandoff,
   handoffSteps, moveWarning, needsYou, pendingMoveControls, planHandoff, planMove, remainingSettleSteps,
-  resolveHandoffOptions, SETTLE_AFTER_SPAWN, threadStartupInput, withSettleStep,
+  resolveHandoffOptions, SETTLE_AFTER_SPAWN, SETTLE_STEPS, threadStartupInput, withSettleStep,
 } from "./model.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
@@ -228,4 +228,14 @@ test("a proposed card shows a short description, and comments show when they wer
   assert.equal(descriptionPreview("   "), null);
   assert.equal(commentWhen(Date.UTC(2026, 10, 3)), new Date(Date.UTC(2026, 10, 3)).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
   assert.equal(commentWhen(null), "");
+});
+
+test("a Done move clears handoff settle progress so reopen then handoff starts fresh", async () => {
+  const { readFileSync } = await import("node:fs");
+  const storeSrc = readFileSync(new URL("./store.js", import.meta.url), "utf8");
+  assert.match(storeSrc, /wanted === "done"[\s\S]*?await deleteHandoff\(id\)/);
+  assert.equal(/wanted === "done" && t\.stage !== "done"[\s\S]*?DELETE FROM handoff WHERE ticket_id/.test(storeSrc), false);
+  const stale = SETTLE_STEPS.reduce((done, step) => withSettleStep(done, step), {});
+  assert.deepEqual(remainingSettleSteps(stale), []);
+  assert.deepEqual(remainingSettleSteps({}), [...SETTLE_STEPS]);
 });

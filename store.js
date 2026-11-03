@@ -368,7 +368,7 @@ export function moveTicket(id, wanted, resolution = "done") {
         await threads.archive(thread.id);
         await run("UPDATE ticket_thread SET archived_by_done = 1 WHERE thread_id = ?", [thread.id]);
       }
-      await run("DELETE FROM handoff WHERE ticket_id = ?", [id]);
+      await deleteHandoff(id);
     }
     if (t.stage === "done" && wanted !== "done") {
       const restore = links.filter(l => l.archived_by_done);
