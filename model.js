@@ -106,7 +106,7 @@ export function isGated(from, to, resolution = "done") {
   return from === "backlog" && to !== "backlog" && !(to === "done" && resolution === "wont-do");
 }
 
-/** What a move must ask before it changes the ticket. Warnings still come from the move itself. */
+/** Decides the gate before a move; warnings still come from the move itself. */
 export function planMove(ticket, stage, resolution = "done") {
   if (!STAGES.includes(stage)) return { action: "refuse", reason: `Unknown stage ${stage}` };
   if (resolution !== "done" && resolution !== "wont-do") return { action: "refuse", reason: "Unknown resolution" };
@@ -121,8 +121,8 @@ export function planMove(ticket, stage, resolution = "done") {
 }
 
 /**
- * A handoff that already spawned its successor finishes settle without spawning again.
- * Sources stay live until the person archives them; collecting each source's handoff
+ * Resume finishes settle when a successor already exists.
+ * Sources stay live until Archive sources; collecting each source's handoff
  * needs host threads.send and threads.output, which are not on main yet.
  * @param {{ sources?: string[], nextThreadId?: string | null, threads: Record<string, { onTicket?: boolean, archived?: boolean }> }} input
  */
@@ -170,7 +170,6 @@ export function withSettleStep(done, step) {
 }
 
 /**
- * Merge a resubmitted form with a saved job.
  * Awaiting archival refuses a new handoff. A saved successor keeps its original options.
  */
 export function resolveHandoffOptions(options = {}, saved = null) {
@@ -203,20 +202,18 @@ export function resolveHandoffOptions(options = {}, saved = null) {
   };
 }
 
-/** Short description shown on a proposed ticket card. */
 export function descriptionPreview(text, max = 240) {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) return null;
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max).trimEnd()}…`;
 }
 
-/** Short date for a comment header. */
 export function commentWhen(ms) {
   if (ms == null || !Number.isFinite(Number(ms))) return "";
   return new Date(Number(ms)).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-/** Text pasted into a new thread. The person still presses Enter to send it. */
+/** Paste only; the person still presses Enter to send. */
 export function threadStartupInput({ personaText = null, prompt = "", ticketId }) {
   const parts = [];
   if (personaText && String(personaText).trim()) parts.push(String(personaText).trim());
@@ -225,7 +222,6 @@ export function threadStartupInput({ personaText = null, prompt = "", ticketId }
   return parts.join("\n\n");
 }
 
-/** Controls for a proposed stage move on a card or ticket page. */
 export function pendingMoveControls(ticket, prefix) {
   if (!ticket.pendingStage) return null;
   const actions = [
@@ -236,7 +232,6 @@ export function pendingMoveControls(ticket, prefix) {
   return { prompt: `Move to ${TITLES[ticket.pendingStage]}?`, actions };
 }
 
-/** WIP and blocker notes from a successful move. */
 export function moveWarning(moved) {
   return moved && typeof moved.warning === "string" ? moved.warning : "";
 }
@@ -419,8 +414,8 @@ function dropThreadOnCard(threadId, card, tickets, loose) {
 }
 
 /**
- * A card is the innermost target, so a drop it does not want becomes the column's move.
- * Top and bottom of a Backlog card rank; the middle nests when that is allowed.
+ * Card is the innermost drop target: other ticket drops still move to its stage.
+ * Top and bottom of a Backlog card rank; middle nests when allowed.
  * @param {string} payload @param {"top"|"middle"|"bottom"|null} side @param {any} card @param {readonly any[]} tickets @param {readonly any[]} [loose]
  */
 export function dropOnCard(payload, side, card, tickets, loose = []) {

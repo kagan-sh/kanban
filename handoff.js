@@ -19,7 +19,6 @@ export function extractHandoff(output) {
   return block;
 }
 
-/** Attach, env, open, paste and toast for a thread that already exists. */
 async function settleSpawnedThread(ticket, thread, options = {}) {
   const persona = options.persona ?? null;
   let progress = { ...(options.progress ?? {}) };
@@ -52,7 +51,7 @@ async function settleSpawnedThread(ticket, thread, options = {}) {
   if (!progress.pasted) {
     const personaText = options.personaText !== undefined ? options.personaText : await personaBody(persona);
     const input = threadStartupInput({ personaText, prompt: options.prompt ?? "", ticketId: ticket.id });
-    // threads.send (feat/hook-send, in review) will replace pasteIntoThread once it lands.
+    // pasteIntoThread stands in until threads.send (feat/hook-send) lands.
     await pasteIntoThread(thread.id, input);
     await save("pasted");
   }
