@@ -32,6 +32,9 @@ function boardLink(projectId, ticketId) { return host.openPanel("board", { proje
 function requestBoardMove(ticket, stage) {
   return host.openPanel("board", { projectId: ticket.projectId, ticketId: ticket.id, move: stage, moveAt: Date.now() });
 }
+function requestBoardStart(ticket) {
+  return host.openPanel("board", { projectId: ticket.projectId, ticketId: ticket.id, start: true, startAt: Date.now() });
+}
 function followContext(cx) { return cx.spawn(async cx => { for (;;) { await host.onContextChanged(); cx.notify(); } }); }
 
 class WatchedView extends View {
@@ -138,11 +141,13 @@ export class BoardPanel extends WatchedView {
       this.applyContext(host.context());
       await this.refresh();
       this.consumeMove(cx);
+      this.consumeStart(cx);
       cx.notify();
       for (;;) {
         this.applyContext(await host.onContextChanged());
         await this.refresh();
         this.consumeMove(cx);
+        this.consumeStart(cx);
         cx.notify();
       }
     });
@@ -153,9 +158,17 @@ export class BoardPanel extends WatchedView {
     if (props && Object.hasOwn(props, "ticketId")) this.ticketId = props.ticketId ?? null;
     const request = props?.move ? `${props.ticketId}:${props.move}:${props.moveAt ?? ""}` : null;
     if (request !== this.lastMoveRequest) { this.requestedMove = props?.move; this.lastMoveRequest = request; }
+    const start = props?.start ? `${props.ticketId}:${props.startAt ?? ""}` : null;
+    if (start !== this.lastStartRequest) { this.requestedStart = Boolean(props?.start); this.lastStartRequest = start; }
   }
   consumeMove(cx) {
     if (this.requestedMove && this.ticket) { const stage = this.requestedMove; this.requestedMove = null; this.move(this.ticket, stage, cx); }
+  }
+  consumeStart(cx) {
+    if (this.requestedStart && this.ticket) {
+      this.requestedStart = false;
+      this.act(cx, () => this.prepare("start", this.ticket));
+    }
   }
   async refresh() {
     await super.refresh();
@@ -544,6 +557,12 @@ export class BoardPanel extends WatchedView {
       .child(button(`${prefix}:retry-handoff`, "Retry", cx => this.act(cx, () => handoff.retryHandoff(t.id))))
       .child(button(`${prefix}:start-anyway`, job.consolidate ? "Start anyway" : "Start without handoff", cx => this.act(cx, () => handoff.startWithoutHandoff(t.id)))));
   }
+  handoffArchive(t, cx, prefix) {
+    if (t.handoff?.status !== "awaiting-archive") return null;
+    return v_flex().gap_1()
+      .child(muted("Sources are still live. Archive them when the new thread has what it needs.", cx))
+      .child(button(`${prefix}:archive-sources`, "Archive sources", cx => this.act(cx, () => handoff.archiveSources(t.id))));
+  }
   renderCard(t, cx, colors, radius) {
     const parent = t.parentId ? this.data.tickets.find(p => p.id === t.parentId) : null;
     const children = this.data.tickets.filter(c => c.parentId === t.id);
@@ -605,6 +624,8 @@ export class BoardPanel extends WatchedView {
     if (t.pendingStage) card.child(this.renderPendingMove(t, cx, `card:${t.id}`));
     const failed = this.handoffFailure(t, cx, `card:${t.id}`);
     if (failed) card.child(failed);
+    const archive = this.handoffArchive(t, cx, `card:${t.id}`);
+    if (archive) card.child(archive);
     if (!t.proposed && next) {
       card.child(h_flex().justify_end()
         .child(button(`move:${t.id}:${next}`, `→ ${TITLES[next]}`, cx => this.move(t, next, cx))));
@@ -655,6 +676,8 @@ export class BoardPanel extends WatchedView {
     if (t.pendingStage) body.child(this.renderPendingMove(t, cx, "detail"));
     const failed = this.handoffFailure(t, cx, "detail");
     if (failed) body.child(failed);
+    const archive = this.handoffArchive(t, cx, "detail");
+    if (archive) body.child(archive);
     body.child(new Markdown(`description:${t.id}`, t.description || "No description"));
     body.child(button("edit-ticket", "Edit ticket…", cx => { this.form = "edit"; this.title.set_value(t.title); this.description.set_value(t.description); cx.notify(); }));
     if (t.issue) body.child(button("open-issue", `${t.issue.repo}#${t.issue.number}`, cx => this.act(cx, () => host.openUrl(t.issue.url))));
@@ -761,16 +784,22 @@ export class BoardPanel extends WatchedView {
       const canSubmit = this.form === "start" || this.sourceIds.size > 0;
       actions.child(new KgButton("submit-thread").primary().label(this.form === "start" ? "Start thread" : this.form === "consolidate" ? "Merge into new thread" : "Start new thread from sources").disabled(this.busy || !canSubmit).on_click((a, b) => this.act(clickCx(a, b), async () => {
         const options = { persona: this.persona || null, prompt: this.prompt.value() };
-        if (this.form === "start") await handoff.startThread(this.ticketId, options);
-        else {
-          if (this.pendingMove) {
-            const moved = await store.moveTicket(this.pendingMove.id, this.pendingMove.stage);
-            const warning = moveWarning(moved);
-            if (warning) this.note = warning;
+        const form = this.form;
+        try {
+          if (form === "start") await handoff.startThread(this.ticketId, options);
+          else {
+            if (this.pendingMove) {
+              const moved = await store.moveTicket(this.pendingMove.id, this.pendingMove.stage);
+              const warning = moveWarning(moved);
+              if (warning) this.note = warning;
+            }
+            await handoff.startHandoff(this.ticketId, { ...options, sourceThreadIds: [...this.sourceIds], consolidate: form === "consolidate" });
           }
-          await handoff.startHandoff(this.ticketId, { ...options, sourceThreadIds: [...this.sourceIds], consolidate: this.form === "consolidate" });
+        } finally {
+          // Close even on failure so Retry on the card is the recovery path, not a second spawn.
+          this.form = null;
+          this.pendingMove = null;
         }
-        this.form = null; this.pendingMove = null;
       })));
       form.child(actions);
     } else if (this.form === "attach") {
@@ -844,7 +873,7 @@ export class SidebarList extends WatchedView {
         if (stage === ticket.stage) continue;
         line.child(button(`side-move:${row.id}:${stage}`, TITLES[stage], cx => this.act(cx, () => requestBoardMove(ticket, stage))));
       }
-      if (ticket.stage !== "done") line.child(button(`side-start:${row.id}`, "Start thread", cx => this.act(cx, () => handoff.startThread(ticket.id, {}))));
+      if (ticket.stage !== "done") line.child(button(`side-start:${row.id}`, "Start thread", cx => this.act(cx, () => requestBoardStart(ticket))));
     }
     const unpin = ticket ? (row.threads ?? []).filter(thread => thread.pinned) : [];
     const pinTarget = row.thread;
