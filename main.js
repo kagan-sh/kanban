@@ -9,7 +9,16 @@ export { BoardPanel, SidebarList } from "./views.js";
 export default class Plugin extends View {
   init(_props, cx) {
     this.jobs = cx.spawn(async () => {
-      await store.ready();
+      try {
+        await store.ready();
+      } catch (error) {
+        const message = `Kanban database: ${error}`;
+        log("error", message);
+        for (;;) {
+          const job = await next();
+          try { fail(job.id, message); } catch { /* already settled */ }
+        }
+      }
       for (;;) {
         const job = await next();
         if (job.kind === "event") {

@@ -1,7 +1,7 @@
 // @ts-check
 import { migrate, query, run, transaction } from "kagan/database";
 import * as threads from "kagan/threads";
-import { stage, text, KINDS, BUG_TEMPLATE, isGated, startProblem, acceptanceCriteria, daysInStage, rankFor, rankOrder, looksLikeUserStory, USER_STORY_WARNING } from "./model.js";
+import { stage, text, KINDS, BUG_TEMPLATE, isGated, startProblem, acceptanceCriteria, daysInStage, rankFor, rankOrder, looksLikeUserStory, USER_STORY_WARNING, failInterruptedHandoff } from "./model.js";
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -19,8 +19,16 @@ export function serial(fn) {
   return result;
 }
 
+// A CHECK on ADD COLUMN is refused, so new databases add the column and the
+// script checks the value. Databases that already recorded the CHECK form
+// still match that history.
+const columnChecks = {
+  "ALTER TABLE ticket ADD COLUMN kind TEXT": "ALTER TABLE ticket ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind IN ('story', 'bug', 'task'))",
+  "ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done'": "ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done' CHECK (resolution IN ('done', 'wont-do'))",
+};
+
 export function ready() {
-  return migrated ??= migrate([
+  const statements = [
     // Fresh installs only. An older incompatible SQLite under
     // ~/.kagan/plugins/dev.kagan.kanban/data/ must be moved aside first.
     `CREATE TABLE ticket (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('backlog','in-progress','review','done')), description TEXT NOT NULL DEFAULT '', proposed INTEGER NOT NULL DEFAULT 0, issue_repo TEXT, issue_number INTEGER, issue_url TEXT, environment_id TEXT, pending_stage TEXT, parent_id TEXT REFERENCES ticket(id) ON DELETE SET NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(project_id, number))`,
@@ -33,15 +41,27 @@ export function ready() {
     `CREATE TABLE linked_repo (project_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(project_id, repo))`,
     `CREATE TABLE unlinked_repo (project_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(project_id, repo))`,
     `CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-    `ALTER TABLE ticket ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind IN ('story', 'bug', 'task'))`,
-    `ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done' CHECK (resolution IN ('done', 'wont-do'))`,
+    `ALTER TABLE ticket ADD COLUMN kind TEXT`,
+    `ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done'`,
     `ALTER TABLE ticket ADD COLUMN stage_at INTEGER`,
     `ALTER TABLE ticket ADD COLUMN rank REAL`,
     `CREATE TABLE ticket_block (blocked_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, blocker_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, PRIMARY KEY (blocked_id, blocker_id))`,
     `CREATE INDEX ticket_block_blocker ON ticket_block (blocker_id)`,
     `CREATE TABLE board_rules (project_id TEXT PRIMARY KEY, age_warn_days INTEGER NOT NULL DEFAULT 14, wip_limit INTEGER)`,
     `UPDATE ticket SET rank = (SELECT ordered.n FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY proposed DESC, (pending_stage IS NOT NULL) DESC, updated_at DESC, number) AS n FROM ticket WHERE stage = 'backlog') AS ordered WHERE ordered.id = ticket.id) WHERE stage = 'backlog' AND rank IS NULL`,
-  ]);
+  ];
+  return migrated ??= migrate(statements).catch(error => {
+    if (!String(error).includes("cannot be changed")) throw error;
+    return migrate(statements.map(sql => columnChecks[sql] ?? sql));
+  }).then(() => failInterruptedHandoffs());
+}
+
+async function failInterruptedHandoffs() {
+  const rows = await query("SELECT * FROM handoff WHERE status = ?", ["running"]);
+  for (const row of rows) {
+    const next = failInterruptedHandoff(row);
+    await run("UPDATE handoff SET status = ?, error = ? WHERE ticket_id = ?", [next.status, next.error, row.ticket_id]);
+  }
 }
 
 export function touch() {
@@ -122,6 +142,19 @@ export async function resolveTicket(ref, context) {
   return own;
 }
 
+function handoffRecord(row) {
+  if (!row) return null;
+  const error = row.error == null || String(row.error).trim() === "" ? null : String(row.error);
+  return {
+    status: String(row.status ?? ""),
+    error,
+    persona: row.persona == null ? null : String(row.persona),
+    prompt: row.prompt == null ? "" : String(row.prompt),
+    consolidate: Number(row.consolidate) === 1,
+    nextThreadId: row.next_thread_id == null || row.next_thread_id === "" ? null : String(row.next_thread_id),
+  };
+}
+
 export function board(projectIds) {
   return serial(async () => {
     await ready();
@@ -137,7 +170,7 @@ export function board(projectIds) {
       const t = ticket(row);
       const own = links.filter(l => l.ticket_id === t.id);
       const live = own.map(l => byId.get(l.thread_id)).filter(t => t && t.archivedAt === null && t.visibility !== "hidden");
-      return { ...t, threads: live, links: own.map(l => ({ threadId: String(l.thread_id), persona: l.persona })), handoff: handoffs.find(h => h.ticket_id === t.id) ?? null, updatedAt: Math.max(t.updatedAt, ...live.map(t => t.updatedAt)), blockedBy: [], blocks: [] };
+      return { ...t, threads: live, links: own.map(l => ({ threadId: String(l.thread_id), persona: l.persona })), handoff: handoffRecord(handoffs.find(h => h.ticket_id === t.id)), updatedAt: Math.max(t.updatedAt, ...live.map(t => t.updatedAt)), blockedBy: [], blocks: [] };
     });
     const ticketById = new Map(tickets.map(t => [t.id, t]));
     const refOf = (id) => {
@@ -260,6 +293,64 @@ export function dismissMove(id) {
   return serial(async () => { await ticketRow(id); await run("UPDATE ticket SET pending_stage = NULL WHERE id = ?", [id]); touch(); });
 }
 
+export async function readHandoff(id) {
+  await ready();
+  const rows = await query("SELECT * FROM handoff WHERE ticket_id = ?", [id]);
+  if (!rows.length) return null;
+  const sources = (await query("SELECT thread_id FROM handoff_source WHERE ticket_id = ?", [id])).map(row => String(row.thread_id));
+  return { ...handoffRecord(rows[0]), sources };
+}
+
+async function upsertHandoff(id, options, status, error) {
+  await ready();
+  await run(
+    `INSERT INTO handoff (ticket_id, persona, prompt, consolidate, status, error, next_thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(ticket_id) DO UPDATE SET persona = excluded.persona, prompt = excluded.prompt, consolidate = excluded.consolidate, status = excluded.status, error = excluded.error, next_thread_id = COALESCE(excluded.next_thread_id, handoff.next_thread_id)`,
+    [id, options.persona ?? null, options.prompt ?? "", options.consolidate ? 1 : 0, status, error, options.nextThreadId ?? null],
+  );
+  const sources = [...new Set(options.sourceThreadIds ?? [])];
+  if (sources.length) {
+    const now = Date.now();
+    await transaction([
+      { sql: "DELETE FROM handoff_source WHERE ticket_id = ?", params: [id] },
+      ...sources.map(threadId => ({
+        sql: "INSERT INTO handoff_source (ticket_id, thread_id, baseline, queued_id, asked_at, comment_id) VALUES (?, ?, NULL, NULL, ?, NULL)",
+        params: [id, threadId, now],
+      })),
+    ]);
+  }
+  touch();
+}
+
+export function saveHandoffProgress(id, options) {
+  return upsertHandoff(id, options, "running", null);
+}
+
+export function markHandoffAwaitingArchive(id, options) {
+  return upsertHandoff(id, options, "awaiting-archive", null);
+}
+
+export function writeHandoffFailure(id, options, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return upsertHandoff(id, options, "failed", message);
+}
+
+export async function deleteHandoff(id) {
+  await ready();
+  await run("DELETE FROM handoff WHERE ticket_id = ?", [id]);
+  await run("DELETE FROM kv WHERE key = ?", [`handoff-settle:${id}`]);
+  touch();
+}
+
+export async function readSettleProgress(id) {
+  const raw = await kvJson(`handoff-settle:${id}`, {});
+  return raw && typeof raw === "object" ? raw : {};
+}
+
+export async function writeSettleProgress(id, progress) {
+  await kvSet(`handoff-settle:${id}`, JSON.stringify(progress ?? {}));
+}
+
 export function moveTicket(id, wanted, resolution = "done") {
   return serial(async () => {
     stage(wanted);
@@ -277,7 +368,7 @@ export function moveTicket(id, wanted, resolution = "done") {
         await threads.archive(thread.id);
         await run("UPDATE ticket_thread SET archived_by_done = 1 WHERE thread_id = ?", [thread.id]);
       }
-      await run("DELETE FROM handoff WHERE ticket_id = ?", [id]);
+      await deleteHandoff(id);
     }
     if (t.stage === "done" && wanted !== "done") {
       const restore = links.filter(l => l.archived_by_done);

@@ -2,7 +2,7 @@
 
 A native ticket board for [kagan](https://kagan.sh). One plain-JavaScript plugin owns the board, ticket detail, replaceable sidebar list, CLI and SQLite data. No build step.
 
-Ported from the bb-kit Kanban plugin: tickets move through **Backlog → In progress → Review → Done**, hold one or more threads, and stay separate from thread runtime status. Threads on no ticket are **loose**. Script drag-and-drop is not in the plugin API yet, so moves and attachment use menus and buttons.
+Tickets move through **Backlog → In progress → Review → Done**, hold one or more threads, and stay separate from thread runtime status. Threads on no ticket are **loose**. Drag a card between columns to move it, or onto the top or bottom of a Backlog card to rank it, or onto the middle of a card to make it a sub-ticket. Drag a thread onto a card to attach it, onto a column to make a ticket, or onto Loose to take it off. A refused move says why. Menus and the N key still work.
 
 ## Install
 
@@ -28,7 +28,8 @@ Optional: Settings → Appearance → Sidebar → pick this plugin’s ticket li
 - Create and search tickets in Backlog, In progress, Review and Done. The board can show several projects; new tickets go to the selected project.
 - Open a ticket to edit its title and description, comment, set a parent, attach loose threads, and start a thread with a persona.
 - Each ticket gets one worktree when its project has committed Git history. Later threads reuse it. Non-Git projects use the project folder; Personal uses a personal environment. Attached threads keep their own environment.
-- Move with the ticket menu. In progress and Review offer **Hand off** or **Just move**. Handoff records a request comment, starts a successor with the chosen program, and archives the source threads.
+- Move with the ticket menu. In progress and Review offer **Hand off** or **Just move**. Handoff records a request comment, starts a successor with the chosen program and persona/prompt pasted into that thread (press Enter to send), and leaves the source threads live until you click **Archive sources**.
+- **Host gap:** collecting each source's handoff before archiving needs `threads.send` and `threads.output`, which are not on kagan main yet. Until those land, sources stay live and archiving is manual. Pasting uses `pasteIntoThread`; `threads.send` (feat/hook-send) should replace that once it merges.
 - Done archives live threads. Reopening restores only threads Done archived, including retired environments. Manually archived threads stay archived.
 - Agent additions are proposed by default. Moves apply immediately by default; settings can require acceptance or allow moves to Done.
 - Link repositories and import open issues through **Repos…**. Search and filters use `gh`. Imports copy the body, source link and comments once; nothing writes to GitHub.

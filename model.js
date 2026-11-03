@@ -23,7 +23,10 @@ export function attention(thread) {
 }
 
 export function needsYou(ticket) {
-  return Boolean(ticket.proposed || ticket.pendingStage || ticket.handoff?.error || ticket.threads.some(attention));
+  const handoff = ticket.handoff;
+  const failed = Boolean(handoff && (handoff.status === "failed" || handoff.error));
+  const archive = handoff?.status === "awaiting-archive";
+  return Boolean(ticket.proposed || ticket.pendingStage || failed || archive || ticket.threads.some(attention));
 }
 
 export function target(threads) {
@@ -101,6 +104,141 @@ export function startProblem(ticket) {
 /** @param {string} from @param {string} to @param {string} [resolution] */
 export function isGated(from, to, resolution = "done") {
   return from === "backlog" && to !== "backlog" && !(to === "done" && resolution === "wont-do");
+}
+
+/** Gate only; WIP and blocker warnings come from the move. */
+export function planMove(ticket, stage, resolution = "done") {
+  if (!STAGES.includes(stage)) return { action: "refuse", reason: `Unknown stage ${stage}` };
+  if (resolution !== "done" && resolution !== "wont-do") return { action: "refuse", reason: "Unknown resolution" };
+  if (resolution === "wont-do" && stage !== "done") return { action: "refuse", reason: "Won't do only applies to a move to Done" };
+  if (ticket.stage === stage && (stage !== "done" || (ticket.resolution ?? "done") === resolution)) return { action: "ignore" };
+  const problem = isGated(ticket.stage, stage, resolution) ? startProblem(ticket) : null;
+  if (problem) return { action: "refuse", reason: `Can't start #${ticket.number}: ${problem}.` };
+  const live = (ticket.threads ?? []).length > 0;
+  if (stage === "done" && ticket.stage !== "done" && live) return { action: "confirm-done", stage, resolution };
+  if (resolution !== "wont-do" && (stage === "in-progress" || stage === "review") && live) return { action: "handoff", stage, resolution };
+  return { action: "move", stage, resolution };
+}
+
+/**
+ * Sources stay live until Archive sources; collecting each source's handoff
+ * needs host threads.send and threads.output, which are not on main yet.
+ * @param {{ sources?: string[], nextThreadId?: string | null, threads: Record<string, { onTicket?: boolean, archived?: boolean }> }} input
+ */
+export function planHandoff(input) {
+  const ids = [...new Set(input.sources ?? [])];
+  const nextThreadId = input.nextThreadId || null;
+  if (nextThreadId && ids.includes(nextThreadId)) {
+    return { action: "refuse", reason: "The new thread cannot be one of its own sources", archive: [] };
+  }
+  if (nextThreadId) {
+    const archive = ids.filter(id => id !== nextThreadId && input.threads[id]?.onTicket && !input.threads[id]?.archived);
+    return { action: "resume", nextThreadId, archive };
+  }
+  if (!ids.length || ids.length > 50) return { action: "refuse", reason: "Pick between 1 and 50 source threads", archive: [] };
+  for (const id of ids) {
+    const thread = input.threads[id];
+    if (!thread?.onTicket) return { action: "refuse", reason: "Every source must be on the ticket", archive: [] };
+    if (thread.archived) return { action: "refuse", reason: "Every source must be live", archive: [] };
+  }
+  return { action: "spawn", archive: ids };
+}
+
+/**
+ * Spawn saves the successor id before attach, env, open, paste or toast.
+ * Sources are not archived here; Archive sources is a separate step.
+ */
+export function handoffSteps(plan) {
+  if (plan.action === "resume") return ["finish-successor"];
+  if (plan.action === "spawn") return ["comment", "spawn"];
+  return [];
+}
+
+/** Work that must not run before the successor id is saved. */
+export const SETTLE_AFTER_SPAWN = ["attach", "env", "open", "paste", "toast"];
+
+/** Settle steps recorded after each succeeds, so Retry skips finished work. */
+export const SETTLE_STEPS = ["attached", "env", "opened", "pasted", "toasted"];
+
+export function remainingSettleSteps(done = {}) {
+  return SETTLE_STEPS.filter(step => !done[step]);
+}
+
+export function withSettleStep(done, step) {
+  return { ...done, [step]: true };
+}
+
+export function resolveHandoffOptions(options = {}, saved = null) {
+  if (saved?.status === "awaiting-archive") {
+    return { action: "refuse", reason: "Archive the previous handoff sources first" };
+  }
+  if (saved?.nextThreadId) {
+    const sources = [...new Set(saved.sources ?? [])].filter(id => id !== saved.nextThreadId);
+    return {
+      action: "resume",
+      persona: saved.persona ?? null,
+      prompt: saved.prompt ?? "",
+      consolidate: Boolean(saved.consolidate),
+      sourceThreadIds: sources,
+      nextThreadId: saved.nextThreadId,
+    };
+  }
+  const sources = [...new Set(options.sourceThreadIds ?? [])];
+  const nextThreadId = options.nextThreadId ?? null;
+  if (nextThreadId && sources.includes(nextThreadId)) {
+    return { action: "refuse", reason: "The new thread cannot be one of its own sources" };
+  }
+  return {
+    action: "spawn",
+    persona: options.persona ?? null,
+    prompt: options.prompt ?? "",
+    consolidate: Boolean(options.consolidate),
+    sourceThreadIds: sources,
+    nextThreadId: null,
+  };
+}
+
+export function descriptionPreview(text, max = 240) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) return null;
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max).trimEnd()}…`;
+}
+
+export function commentWhen(ms) {
+  if (ms == null || !Number.isFinite(Number(ms))) return "";
+  return new Date(Number(ms)).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** Paste only; the person still presses Enter to send. */
+export function threadStartupInput({ personaText = null, prompt = "", ticketId }) {
+  const parts = [];
+  if (personaText && String(personaText).trim()) parts.push(String(personaText).trim());
+  if (prompt && String(prompt).trim()) parts.push(String(prompt).trim());
+  parts.push(`Run kg kanban ticket show ${ticketId} first; read its description and comments.`);
+  return parts.join("\n\n");
+}
+
+export function pendingMoveControls(ticket, prefix) {
+  if (!ticket.pendingStage) return null;
+  const actions = [
+    { id: `${prefix}:accept-move`, label: "Accept" },
+    { id: `${prefix}:dismiss-move`, label: "Dismiss" },
+  ];
+  if (ticket.pendingStage === "done") actions.push({ id: `${prefix}:wont`, label: "Won't do" });
+  return { prompt: `Move to ${TITLES[ticket.pendingStage]}?`, actions };
+}
+
+export function moveWarning(moved) {
+  return moved && typeof moved.warning === "string" ? moved.warning : "";
+}
+
+/** A handoff left as running when the process died becomes a failed job Retry can finish. */
+export function failInterruptedHandoff(row) {
+  if (String(row.status) !== "running") return row;
+  const error = row.error == null || String(row.error).trim() === ""
+    ? "Interrupted before the handoff finished"
+    : String(row.error);
+  return { ...row, status: "failed", error };
 }
 
 /** @param {string} title */
@@ -205,6 +343,123 @@ export function criteriaLine(description, kind) {
   const counted = acceptanceCriteria(description);
   if (!counted || (counted.total === 0 && kind !== "story")) return null;
   return `AC ${counted.done}/${counted.total}`;
+}
+
+/** @param {{title?: string, id?: string}} thread @param {string} search */
+export function threadMatches(thread, search) {
+  const needle = search.trim().toLowerCase();
+  if (!needle) return true;
+  return `${thread.title ?? ""} ${thread.id ?? ""}`.toLowerCase().includes(needle);
+}
+
+/** @param {string} payload */
+export function parseDrag(payload) {
+  const text = String(payload ?? "");
+  const split = text.indexOf(":");
+  if (split < 1) return null;
+  const kind = text.slice(0, split);
+  const id = text.slice(split + 1);
+  if ((kind !== "ticket" && kind !== "thread") || !id) return null;
+  return { kind, id };
+}
+
+const IGNORE = { action: "ignore", label: "" };
+
+/** @param {string} reason */
+function refuse(reason) {
+  return { action: "refuse", reason, label: reason };
+}
+
+/** @param {readonly {id: string, projectId: string, proposed?: boolean, parentId?: string | null}[]} tickets @param {string} childId @param {string} parentId */
+export function canNest(tickets, childId, parentId) {
+  const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
+  const child = byId.get(childId);
+  const parent = byId.get(parentId);
+  if (!child || !parent || child.projectId !== parent.projectId || child.proposed || parent.proposed) return false;
+  for (let at = parent; at; at = at.parentId ? byId.get(at.parentId) : undefined) {
+    if (at.id === child.id) return false;
+  }
+  return true;
+}
+
+/** @param {string} threadId @param {readonly any[]} tickets @param {readonly any[]} loose */
+function projectOfThread(threadId, tickets, loose) {
+  for (const ticket of tickets) {
+    const thread = (ticket.threads ?? []).find(item => item.id === threadId);
+    if (thread) return thread.projectId ?? ticket.projectId;
+  }
+  return loose.find(thread => thread.id === threadId)?.projectId ?? null;
+}
+
+/** @param {any} ticket @param {string} stage */
+function moveDecision(ticket, stage) {
+  if (ticket.proposed) return refuse("Accept the proposed ticket first");
+  if (ticket.stage === stage) return IGNORE;
+  const problem = isGated(ticket.stage, stage, "done") ? startProblem(ticket) : null;
+  if (problem) return refuse(`Can't start #${ticket.number}: ${problem}.`);
+  return { action: "move", id: ticket.id, stage, label: `Drop to move to ${TITLES[stage]}` };
+}
+
+/** @param {string} threadId @param {any} card @param {readonly any[]} tickets @param {readonly any[]} loose */
+function dropThreadOnCard(threadId, card, tickets, loose) {
+  if ((card.threads ?? []).some(thread => thread.id === threadId)) return IGNORE;
+  if (card.proposed || card.stage === "done") return refuse("Accept or reopen the ticket before attaching a thread");
+  const projectId = projectOfThread(threadId, tickets, loose);
+  if (projectId && projectId !== card.projectId) return refuse("Attach a thread from the same project as the ticket");
+  return { action: "attach", ticketId: card.id, threadId, label: "Drop to add the thread" };
+}
+
+/**
+ * Card is the innermost drop target: other ticket drops still move to its stage.
+ * Top and bottom of a Backlog card rank; middle nests when allowed.
+ * @param {string} payload @param {"top"|"middle"|"bottom"|null} side @param {any} card @param {readonly any[]} tickets @param {readonly any[]} [loose]
+ */
+export function dropOnCard(payload, side, card, tickets, loose = []) {
+  if (!side) return IGNORE;
+  const parsed = parseDrag(payload);
+  if (!parsed || !card) return IGNORE;
+  if (parsed.kind === "thread") return dropThreadOnCard(parsed.id, card, tickets, loose);
+  const dragged = tickets.find(ticket => ticket.id === parsed.id);
+  if (!dragged || dragged.id === card.id) return IGNORE;
+  if (dragged.proposed) return refuse("Accept the proposed ticket first");
+  if (side !== "middle" && dragged.stage === "backlog" && card.stage === "backlog" && dragged.projectId === card.projectId && !card.proposed) {
+    const above = side === "top";
+    return {
+      action: "rank",
+      id: dragged.id,
+      place: above ? { before: card.id } : { after: card.id },
+      label: `Drop to rank it ${above ? "above" : "below"} #${card.number}`,
+    };
+  }
+  if (side === "middle" && canNest(tickets, dragged.id, card.id)) {
+    return { action: "nest", id: dragged.id, parentId: card.id, label: "Drop to make it a sub-ticket" };
+  }
+  return moveDecision(dragged, card.stage);
+}
+
+/** @param {string} payload @param {string} stage @param {readonly any[]} tickets */
+export function dropOnColumn(payload, stage, tickets) {
+  const parsed = parseDrag(payload);
+  if (!parsed || !STAGES.includes(stage)) return IGNORE;
+  if (parsed.kind === "thread") {
+    if (stage === "done") return refuse("Create a ticket before moving it to Done");
+    const home = tickets.find(ticket => (ticket.threads ?? []).some(thread => thread.id === parsed.id));
+    if (home?.stage === stage) return IGNORE;
+    const label = stage === "backlog" ? "Drop to make a ticket" : `Drop to make a ticket in ${TITLES[stage]}`;
+    return { action: "create", threadId: parsed.id, stage, label };
+  }
+  const dragged = tickets.find(ticket => ticket.id === parsed.id);
+  if (!dragged) return IGNORE;
+  return moveDecision(dragged, stage);
+}
+
+/** @param {string} payload @param {readonly any[]} tickets */
+export function dropOnLoose(payload, tickets) {
+  const parsed = parseDrag(payload);
+  if (!parsed || parsed.kind !== "thread") return IGNORE;
+  const home = tickets.find(ticket => (ticket.threads ?? []).some(thread => thread.id === parsed.id));
+  if (!home) return IGNORE;
+  return { action: "detach", threadId: parsed.id, label: "Drop to take it off its ticket" };
 }
 
 export function sidebarRows(projects, tickets, live, activeProject, expanded, collapsed, frozen = []) {
