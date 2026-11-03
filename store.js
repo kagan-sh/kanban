@@ -134,6 +134,18 @@ export async function resolveTicket(ref, context) {
   return own;
 }
 
+function handoffRecord(row) {
+  if (!row) return null;
+  const error = row.error == null || String(row.error).trim() === "" ? null : String(row.error);
+  return {
+    status: String(row.status ?? ""),
+    error,
+    persona: row.persona == null ? null : String(row.persona),
+    prompt: row.prompt == null ? "" : String(row.prompt),
+    consolidate: Number(row.consolidate) === 1,
+  };
+}
+
 export function board(projectIds) {
   return serial(async () => {
     await ready();
@@ -149,7 +161,7 @@ export function board(projectIds) {
       const t = ticket(row);
       const own = links.filter(l => l.ticket_id === t.id);
       const live = own.map(l => byId.get(l.thread_id)).filter(t => t && t.archivedAt === null && t.visibility !== "hidden");
-      return { ...t, threads: live, links: own.map(l => ({ threadId: String(l.thread_id), persona: l.persona })), handoff: handoffs.find(h => h.ticket_id === t.id) ?? null, updatedAt: Math.max(t.updatedAt, ...live.map(t => t.updatedAt)), blockedBy: [], blocks: [] };
+      return { ...t, threads: live, links: own.map(l => ({ threadId: String(l.thread_id), persona: l.persona })), handoff: handoffRecord(handoffs.find(h => h.ticket_id === t.id)), updatedAt: Math.max(t.updatedAt, ...live.map(t => t.updatedAt)), blockedBy: [], blocks: [] };
     });
     const ticketById = new Map(tickets.map(t => [t.id, t]));
     const refOf = (id) => {
@@ -270,6 +282,42 @@ export function proposeMove(id, wanted) {
 }
 export function dismissMove(id) {
   return serial(async () => { await ticketRow(id); await run("UPDATE ticket SET pending_stage = NULL WHERE id = ?", [id]); touch(); });
+}
+
+export async function readHandoff(id) {
+  await ready();
+  const rows = await query("SELECT * FROM handoff WHERE ticket_id = ?", [id]);
+  if (!rows.length) return null;
+  const sources = (await query("SELECT thread_id FROM handoff_source WHERE ticket_id = ?", [id])).map(row => String(row.thread_id));
+  return { ...handoffRecord(rows[0]), sources };
+}
+
+export async function writeHandoffFailure(id, options, error) {
+  await ready();
+  const message = error instanceof Error ? error.message : String(error);
+  await run(
+    `INSERT INTO handoff (ticket_id, persona, prompt, consolidate, status, error, next_thread_id) VALUES (?, ?, ?, ?, 'failed', ?, NULL)
+     ON CONFLICT(ticket_id) DO UPDATE SET persona = excluded.persona, prompt = excluded.prompt, consolidate = excluded.consolidate, status = 'failed', error = excluded.error`,
+    [id, options.persona ?? null, options.prompt ?? "", options.consolidate ? 1 : 0, message],
+  );
+  const sources = [...new Set(options.sourceThreadIds ?? [])];
+  if (sources.length) {
+    const now = Date.now();
+    await transaction([
+      { sql: "DELETE FROM handoff_source WHERE ticket_id = ?", params: [id] },
+      ...sources.map(threadId => ({
+        sql: "INSERT INTO handoff_source (ticket_id, thread_id, baseline, queued_id, asked_at, comment_id) VALUES (?, ?, NULL, NULL, ?, NULL)",
+        params: [id, threadId, now],
+      })),
+    ]);
+  }
+  touch();
+}
+
+export async function deleteHandoff(id) {
+  await ready();
+  await run("DELETE FROM handoff WHERE ticket_id = ?", [id]);
+  touch();
 }
 
 export function moveTicket(id, wanted, resolution = "done") {

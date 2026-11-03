@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canNest, dropOnCard, dropOnColumn, dropOnLoose } from "./model.js";
+import { canNest, dropOnCard, dropOnColumn, dropOnLoose, needsYou } from "./model.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
 
@@ -72,4 +72,11 @@ test("a thread joins a card, makes a ticket on a column, and leaves on the loose
   assert.equal(dropOnLoose("thread:thr_a", [host]).action, "detach");
   assert.equal(dropOnLoose("thread:thr_b", [host]).action, "ignore");
   assert.equal(dropOnLoose("ticket:tkt_1", [host]).action, "ignore");
+});
+
+test("a failed handoff needs attention even when the error text is empty", () => {
+  const quiet = ticket("tkt_9", 9, "in-progress");
+  assert.equal(needsYou(quiet), false);
+  assert.equal(needsYou({ ...quiet, handoff: { status: "failed", error: null } }), true);
+  assert.equal(needsYou({ ...quiet, handoff: { status: "running", error: "The reply has no handoff" } }), true);
 });

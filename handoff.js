@@ -77,35 +77,68 @@ export function startThread(id, options = {}) {
 
 export function startHandoff(id, options) {
   return store.serial(async () => {
-    const ticket = await store.ticketRow(id);
-    if (ticket.proposed || ticket.stage === "done") throw new Error("Accept or reopen the ticket first");
-    const ids = [...new Set(options.sourceThreadIds ?? [])];
-    if (!ids.length || ids.length > 50) throw new Error("Pick between 1 and 50 source threads");
-    const links = await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [id]);
-    for (const threadId of ids) {
-      if (!links.some((l) => l.thread_id === threadId)) throw new Error("Every source must be on the ticket");
-      const thread = await threads.get(threadId);
-      if (thread.archivedAt !== null) throw new Error("Every source must be live");
+    try {
+      const next = await runHandoff(id, options);
+      await store.deleteHandoff(id);
+      return next;
+    } catch (error) {
+      await store.writeHandoffFailure(id, options, error);
+      throw error;
     }
-    const persona = options.persona ?? null;
-    const prompt = options.prompt ?? "";
-    const sources = ids.map((threadId) => `\`${threadId}\``).join(", ");
-    await store.addCommentInner(id, {
-      body: [
-        "## Handoff request",
-        "",
-        `Sources: ${sources}`,
-        persona ? `Persona: ${persona}` : null,
-        prompt ? `\n${prompt}` : null,
-        "",
-        HANDOFF_INSTRUCTIONS,
-      ].filter((line) => line !== null).join("\n"),
-      persona,
-    });
-    const next = await spawnForTicket(ticket, { persona, prompt });
-    for (const threadId of ids) await threads.archive(threadId);
-    store.touch();
-    await toast(`Handoff on #${ticket.number} started a new thread`, { label: "Open board", command: "open-board" });
-    return next;
+  });
+}
+
+async function runHandoff(id, options) {
+  const ticket = await store.ticketRow(id);
+  if (ticket.proposed || ticket.stage === "done") throw new Error("Accept or reopen the ticket first");
+  const ids = [...new Set(options.sourceThreadIds ?? [])];
+  if (!ids.length || ids.length > 50) throw new Error("Pick between 1 and 50 source threads");
+  const links = await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [id]);
+  for (const threadId of ids) {
+    if (!links.some((l) => l.thread_id === threadId)) throw new Error("Every source must be on the ticket");
+    const thread = await threads.get(threadId);
+    if (thread.archivedAt !== null) throw new Error("Every source must be live");
+  }
+  const persona = options.persona ?? null;
+  const prompt = options.prompt ?? "";
+  const sources = ids.map((threadId) => `\`${threadId}\``).join(", ");
+  await store.addCommentInner(id, {
+    body: [
+      "## Handoff request",
+      "",
+      `Sources: ${sources}`,
+      persona ? `Persona: ${persona}` : null,
+      prompt ? `\n${prompt}` : null,
+      "",
+      HANDOFF_INSTRUCTIONS,
+    ].filter((line) => line !== null).join("\n"),
+    persona,
+  });
+  const next = await spawnForTicket(ticket, { persona, prompt });
+  for (const threadId of ids) await threads.archive(threadId);
+  store.touch();
+  await toast(`Handoff on #${ticket.number} started a new thread`, { label: "Open board", command: "open-board" });
+  return next;
+}
+
+export async function retryHandoff(id) {
+  const job = await store.readHandoff(id);
+  if (!job) throw new Error("That ticket has no handoff to retry");
+  return startHandoff(id, {
+    sourceThreadIds: job.sources,
+    persona: job.persona,
+    prompt: job.prompt,
+    consolidate: job.consolidate,
+  });
+}
+
+export function startWithoutHandoff(id) {
+  return store.serial(async () => {
+    const ticket = await store.ticketRow(id);
+    if (ticket.proposed || ticket.stage === "done") throw new Error("Accept or reopen the ticket before starting a thread");
+    const job = await store.readHandoff(id);
+    const thread = await spawnForTicket(ticket, { persona: job?.persona ?? null, prompt: job?.prompt || "" });
+    await store.deleteHandoff(id);
+    return thread;
   });
 }

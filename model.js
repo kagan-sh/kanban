@@ -23,7 +23,9 @@ export function attention(thread) {
 }
 
 export function needsYou(ticket) {
-  return Boolean(ticket.proposed || ticket.pendingStage || ticket.handoff?.error || ticket.threads.some(attention));
+  const handoff = ticket.handoff;
+  const failed = Boolean(handoff && (handoff.status === "failed" || handoff.error));
+  return Boolean(ticket.proposed || ticket.pendingStage || failed || ticket.threads.some(attention));
 }
 
 export function target(threads) {
