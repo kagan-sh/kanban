@@ -446,7 +446,7 @@ export class BoardPanel extends WatchedView {
   renderLoose(cx, colors, radius, loose) {
     const active = this.over?.id === "loose";
     const column = v_flex().id("loose").flex_1().min_w("16rem").max_w("16rem").min_h_0().rounded(radius.lg)
-      .border_1().border_dashed().border_color(active ? colors.drop_target : colors.border).bg(colors.surface);
+      .border_1().border_dashed().border_color(active ? colors.ring : colors.border).bg(colors.surface);
     this.dropTarget(column, "loose", payload => dropOnLoose(payload, this.data.tickets));
     const heading = h_flex().gap_2().px_3().pt_3().pb_1().items_center()
       .child(div().font_weight(600).text_size(13).child("Loose").flex_1())
@@ -475,13 +475,13 @@ export class BoardPanel extends WatchedView {
     const over = stage === "in-progress" && boardRules.wipLimit !== null && ownWorking > boardRules.wipLimit;
     const active = this.over?.id === `column:${stage}`;
     const count = div().text_size(11).child(over ? `${ownWorking} / ${boardRules.wipLimit}` : String(tickets.length));
-    count.text_color(over ? colors.warning : colors.muted_foreground);
+    count.text_color(over ? colors.primary : colors.muted_foreground);
     if (over) count.font_weight(600);
     const heading = h_flex().gap_2().px_3().pt_3().pb_2().items_baseline()
       .child(div().font_weight(600).text_size(13).child(TITLES[stage]))
       .child(count);
     const column = v_flex().id(`column:${stage}`).flex_1().min_w("16rem").min_h_0().rounded(radius.lg)
-      .bg(colors.surface).border_1().border_color(active ? colors.drop_target : colors.surface);
+      .bg(colors.surface).border_1().border_color(active ? colors.ring : colors.surface);
     this.dropTarget(column, `column:${stage}`, payload => dropOnColumn(payload, stage, this.data.tickets));
     column.child(heading);
     const cards = visible.map(ticket => this.renderCard(ticket, cx, colors, radius));
@@ -529,20 +529,20 @@ export class BoardPanel extends WatchedView {
     const active = this.over?.id === t.id;
     const dragged = this.drag?.kind === "ticket" && this.drag.id === t.id;
     const card = v_flex().id(`ticket:${t.id}`).gap_1().px_3().py_2().rounded(radius.md).bg(colors.background).border_1()
-      .border_color(active ? colors.drop_target : this.jumpId === t.id ? colors.primary : colors.border)
+      .border_color(active ? colors.ring : this.jumpId === t.id ? colors.primary : colors.border)
       .when(dragged, el => el.opacity(0.4));
     if (!t.proposed) {
       this.dropTarget(this.dragSource(card, "ticket", t.id), t.id, (payload, side) => dropOnCard(payload, side, t, this.data.tickets, this.data.loose));
     }
     if (t.proposed) card.border_dashed();
-    if (active && this.over.side === "top") card.child(div().h(2).w_full().rounded(1).bg(colors.drop_target));
+    if (active && this.over.side === "top") card.child(div().h(2).w_full().rounded(1).bg(colors.ring));
     const opener = new KgButton(`card:${t.id}`).label(t.title).ghost().compact().flex_1().min_w_0().on_click((a, b) => this.openTicket(t.id, clickCx(a, b)));
     if (this.jumpId === t.id) opener.track_focus(this.jumpFocus);
     const meta = [];
     if (t.stage === "backlog" && needsYou(t) && !t.proposed) {
       meta.push(h_flex().gap_1().items_center()
-        .child(div().w(6).h(6).rounded(3).bg(colors.warning))
-        .child(div().text_size(11).font_weight(600).text_color(colors.warning).child("Needs you")));
+        .child(div().w(6).h(6).rounded(3).bg(colors.primary))
+        .child(div().text_size(11).font_weight(600).text_color(colors.primary).child("Needs you")));
     }
     if (t.kind) meta.push(chip(t.kind, cx));
     if (t.stage === "done" && t.resolution === "wont-do") meta.push(chip("won't do", cx));
@@ -552,7 +552,7 @@ export class BoardPanel extends WatchedView {
     if (age !== null) {
       const warn = this.ruleMap.get(t.projectId)?.ageWarnDays ?? AGE_WARN_DAYS;
       const label = div().text_size(11).child(`${age}d`);
-      label.text_color(age > warn ? colors.warning : colors.muted_foreground);
+      label.text_color(age > warn ? colors.primary : colors.muted_foreground);
       if (age > warn) label.font_weight(600);
       meta.push(label);
     }
@@ -604,7 +604,7 @@ export class BoardPanel extends WatchedView {
         this.act(cx, () => this.prepare("start", t));
       }));
     }
-    if (active && this.over.side === "bottom") card.child(div().h(2).w_full().rounded(1).bg(colors.drop_target));
+    if (active && this.over.side === "bottom") card.child(div().h(2).w_full().rounded(1).bg(colors.ring));
     return card;
   }
   renderTicket(cx) {
@@ -815,7 +815,7 @@ export class SidebarList extends WatchedView {
     const threadId = host.context().threadId;
     const all = this.rows();
     const rows = this.onlyNeeds
-      ? all.filter(row => row.project || row.needs || row.pinned || row.thread?.id === threadId)
+      ? all.filter(row => row.project || row.needs || row.pinned || (threadId != null && row.thread?.id === threadId))
       : all;
     const quiet = this.onlyNeeds ? all.length - rows.length : 0;
     const colors = cx.theme().colors;
