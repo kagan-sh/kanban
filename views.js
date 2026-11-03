@@ -522,6 +522,25 @@ export class BoardPanel extends WatchedView {
     }
     return column;
   }
+  pendingMove(t, cx, prefix) {
+    const pending = h_flex().gap_2().flex_wrap()
+      .child(muted(`Move to ${TITLES[t.pendingStage]}?`, cx))
+      .child(button(`${prefix}:accept-move`, "Accept", cx => this.move(t, t.pendingStage, cx)))
+      .child(button(`${prefix}:dismiss-move`, "Dismiss", cx => this.act(cx, () => store.dismissMove(t.id))));
+    if (t.pendingStage === "done") pending.child(button(`${prefix}:wont`, "Won't do", cx => this.move(t, "done", cx, "wont-do")));
+    return pending;
+  }
+  handoffFailure(t, cx, prefix) {
+    const job = t.handoff;
+    if (!job || (job.status !== "failed" && !job.error)) return null;
+    const colors = cx.theme().colors;
+    const box = v_flex().gap_1()
+      .child(div().text_size(12).font_weight(600).text_color(colors.destructive).child(job.consolidate ? "Couldn't consolidate" : "Handoff failed"));
+    if (job.error) box.child(div().text_size(12).text_color(colors.destructive).child(String(job.error)));
+    return box.child(h_flex().gap_2().flex_wrap()
+      .child(button(`${prefix}:retry-handoff`, "Retry", cx => this.act(cx, () => handoff.retryHandoff(t.id))))
+      .child(button(`${prefix}:start-anyway`, job.consolidate ? "Start anyway" : "Start without handoff", cx => this.act(cx, () => handoff.startWithoutHandoff(t.id)))));
+  }
   renderCard(t, cx, colors, radius) {
     const parent = t.parentId ? this.data.tickets.find(p => p.id === t.parentId) : null;
     const children = this.data.tickets.filter(c => c.parentId === t.id);
@@ -579,7 +598,11 @@ export class BoardPanel extends WatchedView {
       card.child(h_flex().gap_2()
         .child(primary(`accept:${t.id}`, "Accept", cx => this.act(cx, () => store.acceptTicket(t.id))))
         .child(button(`dismiss:${t.id}`, "Dismiss", cx => this.act(cx, () => store.dismissTicket(t.id)))));
-    } else if (next) {
+    }
+    if (t.pendingStage) card.child(this.pendingMove(t, cx, `card:${t.id}`));
+    const failed = this.handoffFailure(t, cx, `card:${t.id}`);
+    if (failed) card.child(failed);
+    if (!t.proposed && next) {
       card.child(h_flex().justify_end()
         .child(button(`move:${t.id}:${next}`, `→ ${TITLES[next]}`, cx => this.move(t, next, cx))));
     }
@@ -626,13 +649,9 @@ export class BoardPanel extends WatchedView {
     const held = t.stage === "backlog" ? startProblem(t) : null;
     if (held) body.child(muted(`Can't leave Backlog yet: ${held}. Won't do is still allowed.`, cx));
     if (t.proposed) body.child(h_flex().gap_2().child(button("accept-ticket", "Accept ticket", cx => this.act(cx, () => store.acceptTicket(t.id)))).child(button("dismiss-ticket", "Dismiss", cx => this.act(cx, async () => { await store.dismissTicket(t.id); this.ticketId = null; }))));
-    if (t.pendingStage) {
-      const pending = h_flex().gap_2().flex_wrap().child(`Move to ${TITLES[t.pendingStage]}?`)
-        .child(button("accept-move", "Move", cx => this.move(t, t.pendingStage, cx)));
-      if (t.pendingStage === "done") pending.child(button("accept-wont", "Won't do", cx => this.move(t, "done", cx, "wont-do")));
-      pending.child(button("dismiss-move", "Dismiss", cx => this.act(cx, () => store.dismissMove(t.id))));
-      body.child(pending);
-    }
+    if (t.pendingStage) body.child(this.pendingMove(t, cx, "detail"));
+    const failed = this.handoffFailure(t, cx, "detail");
+    if (failed) body.child(failed);
     body.child(new Markdown(`description:${t.id}`, t.description || "No description"));
     body.child(button("edit-ticket", "Edit ticket…", cx => { this.form = "edit"; this.title.set_value(t.title); this.description.set_value(t.description); cx.notify(); }));
     if (t.issue) body.child(button("open-issue", `${t.issue.repo}#${t.issue.number}`, cx => this.act(cx, () => host.openUrl(t.issue.url))));
@@ -811,6 +830,28 @@ export class SidebarList extends WatchedView {
   open(row, cx) {
     this.act(cx, () => row.project ? boardLink(row.project.id) : row.thread ? host.openThread(row.thread.id) : boardLink(row.ticket.projectId, row.ticket.id));
   }
+  rowActions(row, line) {
+    const ticket = row.ticket && !row.id.startsWith("child:") ? row.ticket : null;
+    if (ticket && !ticket.proposed) {
+      for (const stage of STAGES) {
+        if (stage === ticket.stage) continue;
+        line.child(button(`side-move:${row.id}:${stage}`, TITLES[stage], cx => this.act(cx, () => store.moveTicket(ticket.id, stage))));
+      }
+      if (ticket.stage !== "done") line.child(button(`side-start:${row.id}`, "Start thread", cx => this.act(cx, () => handoff.startThread(ticket.id, {}))));
+    }
+    const unpin = ticket ? (row.threads ?? []).filter(thread => thread.pinned) : [];
+    const pinTarget = row.thread;
+    if (!pinTarget && !unpin.length) return;
+    const pinned = ticket ? Boolean(row.pinned) : Boolean(pinTarget.pinned);
+    line.child(button(`side-pin:${row.id}`, pinned ? "Unpin" : "Pin", cx => this.act(cx, async () => {
+      if (pinned && unpin.length) {
+        for (const thread of unpin) await threads.setPinned(thread.id, false);
+      } else if (pinTarget) {
+        await threads.setPinned(pinTarget.id, !pinTarget.pinned);
+      }
+      store.touch();
+    })));
+  }
   render(cx) {
     const threadId = host.context().threadId;
     const all = this.rows();
@@ -839,12 +880,13 @@ export class SidebarList extends WatchedView {
           .child(button(`collapse:${row.id}`, this.collapsed.has(row.id) ? "Expand project" : "Collapse project", cx => this.act(cx, async () => { this.collapsed.has(row.id) ? this.collapsed.delete(row.id) : this.collapsed.add(row.id); await store.kvSet("sidebar", JSON.stringify([...this.collapsed])); })))
           .child(button(`project:${row.id}`, `${row.project.name}${row.needs ? ` · ${row.needs} need you` : ""}`, cx => this.open(row, cx)).flex_1());
         const title = row.ticket && !row.id.startsWith("child:") ? `${GLYPHS[row.ticket.stage]} #${row.ticket.number} ${row.ticket.title}` : `· ${row.thread.title}${row.thread.projectId !== row.ticket?.projectId && row.ticket ? ` · ${this.projects.find(p => p.id === row.thread.projectId)?.name ?? ""}` : ""}`;
-        const line = h_flex().w_full().h_8().gap_1().px_2().pl(`${(row.depth + 1) * 0.75}rem`).bg(row.id === this.selected || row.thread?.id === host.context().threadId ? colors.selection : colors.surface)
+        const line = h_flex().w_full().min_h(32).flex_wrap().items_center().gap_1().px_2().py_1().pl(`${(row.depth + 1) * 0.75}rem`).bg(row.id === this.selected || row.thread?.id === host.context().threadId ? colors.selection : colors.surface)
           .child(div().flex_1().min_w_0().overflow_hidden().child(button(`row:${row.id}`, title, cx => { this.selected = row.id; this.open(row, cx); })));
         if (row.thread) line.child(new ThreadStatus(row.thread.id));
         if (row.ticket?.proposed) line.child(muted("Proposed", cx));
         if (row.threads?.length > 1) line.child(button(`expand:${row.id}`, `Show ${row.threads.length} threads`, cx => { this.expanded.has(row.id) ? this.expanded.delete(row.id) : this.expanded.add(row.id); cx.notify(); }));
         if (row.ticket && !row.ticket.proposed) line.child(button(`board:${row.id}`, "Open on board", cx => this.act(cx, () => boardLink(row.ticket.projectId, row.ticket.id))));
+        this.rowActions(row, line);
         if (row.thread) line.child(button(`archive:${row.id}`, "Archive thread", cx => this.act(cx, async () => { await threads.archive(row.thread.id); store.touch(); })));
         if (row.thread && !row.ticket) line.child(button(`newtkt:${row.id}`, "Create ticket", cx => this.act(cx, () => store.createTicket({ projectId: row.thread.projectId, title: row.thread.title, threadId: row.thread.id }))));
         return line;
