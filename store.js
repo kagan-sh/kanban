@@ -19,8 +19,16 @@ export function serial(fn) {
   return result;
 }
 
+// A CHECK on ADD COLUMN is refused, so new databases add the column and the
+// script checks the value. Databases that already recorded the CHECK form
+// still match that history.
+const columnChecks = {
+  "ALTER TABLE ticket ADD COLUMN kind TEXT": "ALTER TABLE ticket ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind IN ('story', 'bug', 'task'))",
+  "ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done'": "ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done' CHECK (resolution IN ('done', 'wont-do'))",
+};
+
 export function ready() {
-  return migrated ??= migrate([
+  const statements = [
     // Fresh installs only. An older incompatible SQLite under
     // ~/.kagan/plugins/dev.kagan.kanban/data/ must be moved aside first.
     `CREATE TABLE ticket (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('backlog','in-progress','review','done')), description TEXT NOT NULL DEFAULT '', proposed INTEGER NOT NULL DEFAULT 0, issue_repo TEXT, issue_number INTEGER, issue_url TEXT, environment_id TEXT, pending_stage TEXT, parent_id TEXT REFERENCES ticket(id) ON DELETE SET NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(project_id, number))`,
@@ -33,15 +41,19 @@ export function ready() {
     `CREATE TABLE linked_repo (project_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(project_id, repo))`,
     `CREATE TABLE unlinked_repo (project_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(project_id, repo))`,
     `CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-    `ALTER TABLE ticket ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind IN ('story', 'bug', 'task'))`,
-    `ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done' CHECK (resolution IN ('done', 'wont-do'))`,
+    `ALTER TABLE ticket ADD COLUMN kind TEXT`,
+    `ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done'`,
     `ALTER TABLE ticket ADD COLUMN stage_at INTEGER`,
     `ALTER TABLE ticket ADD COLUMN rank REAL`,
     `CREATE TABLE ticket_block (blocked_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, blocker_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, PRIMARY KEY (blocked_id, blocker_id))`,
     `CREATE INDEX ticket_block_blocker ON ticket_block (blocker_id)`,
     `CREATE TABLE board_rules (project_id TEXT PRIMARY KEY, age_warn_days INTEGER NOT NULL DEFAULT 14, wip_limit INTEGER)`,
     `UPDATE ticket SET rank = (SELECT ordered.n FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY proposed DESC, (pending_stage IS NOT NULL) DESC, updated_at DESC, number) AS n FROM ticket WHERE stage = 'backlog') AS ordered WHERE ordered.id = ticket.id) WHERE stage = 'backlog' AND rank IS NULL`,
-  ]);
+  ];
+  return migrated ??= migrate(statements).catch(error => {
+    if (!String(error).includes("cannot be changed")) throw error;
+    return migrate(statements.map(sql => columnChecks[sql] ?? sql));
+  });
 }
 
 export function touch() {
