@@ -8,7 +8,7 @@ import * as store from "./store.js";
 import * as handoff from "./handoff.js";
 import * as github from "./github.js";
 import { listPersonas } from "./personas.js";
-import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, needsYou, matches, sidebarRows, AGE_WARN_DAYS, startProblem, daysInStage, sortColumn, openBlockers, canBlock, subTicketLine, threadStatusLine, criteriaLine, rankOrder, looksLikeUserStory, USER_STORY_WARNING, KINDS, dropOnCard, dropOnColumn, dropOnLoose, threadMatches, planMove } from "./model.js";
+import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, needsYou, matches, sidebarRows, AGE_WARN_DAYS, startProblem, daysInStage, sortColumn, openBlockers, canBlock, subTicketLine, threadStatusLine, criteriaLine, rankOrder, looksLikeUserStory, USER_STORY_WARNING, KINDS, dropOnCard, dropOnColumn, dropOnLoose, threadMatches, planMove, pendingMoveControls, moveWarning } from "./model.js";
 
 function clickCx(a, b) { return b ?? a; }
 function button(id, label, callback) {
@@ -237,7 +237,8 @@ export class BoardPanel extends WatchedView {
   finishMove(cx, id, stage, resolution) {
     this.act(cx, async () => {
       const moved = await store.moveTicket(id, stage, resolution);
-      if (moved && typeof moved.warning === "string") this.note = moved.warning;
+      const warning = moveWarning(moved);
+      if (warning) this.note = warning;
     });
   }
   rankAgainst(ticket, side) {
@@ -521,12 +522,15 @@ export class BoardPanel extends WatchedView {
     }
     return column;
   }
-  pendingMove(t, cx, prefix) {
-    const pending = h_flex().gap_2().flex_wrap()
-      .child(muted(`Move to ${TITLES[t.pendingStage]}?`, cx))
-      .child(button(`${prefix}:accept-move`, "Accept", cx => this.move(t, t.pendingStage, cx)))
-      .child(button(`${prefix}:dismiss-move`, "Dismiss", cx => this.act(cx, () => store.dismissMove(t.id))));
-    if (t.pendingStage === "done") pending.child(button(`${prefix}:wont`, "Won't do", cx => this.move(t, "done", cx, "wont-do")));
+  renderPendingMove(t, cx, prefix) {
+    const spec = pendingMoveControls(t, prefix);
+    if (!spec) return null;
+    const pending = h_flex().gap_2().flex_wrap().child(muted(spec.prompt, cx));
+    for (const action of spec.actions) {
+      if (action.label === "Accept") pending.child(button(action.id, action.label, cx => this.move(t, t.pendingStage, cx)));
+      else if (action.label === "Dismiss") pending.child(button(action.id, action.label, cx => this.act(cx, () => store.dismissMove(t.id))));
+      else if (action.label === "Won't do") pending.child(button(action.id, action.label, cx => this.move(t, "done", cx, "wont-do")));
+    }
     return pending;
   }
   handoffFailure(t, cx, prefix) {
@@ -598,7 +602,7 @@ export class BoardPanel extends WatchedView {
         .child(primary(`accept:${t.id}`, "Accept", cx => this.act(cx, () => store.acceptTicket(t.id))))
         .child(button(`dismiss:${t.id}`, "Dismiss", cx => this.act(cx, () => store.dismissTicket(t.id)))));
     }
-    if (t.pendingStage) card.child(this.pendingMove(t, cx, `card:${t.id}`));
+    if (t.pendingStage) card.child(this.renderPendingMove(t, cx, `card:${t.id}`));
     const failed = this.handoffFailure(t, cx, `card:${t.id}`);
     if (failed) card.child(failed);
     if (!t.proposed && next) {
@@ -648,7 +652,7 @@ export class BoardPanel extends WatchedView {
     const held = t.stage === "backlog" ? startProblem(t) : null;
     if (held) body.child(muted(`Can't leave Backlog yet: ${held}. Won't do is still allowed.`, cx));
     if (t.proposed) body.child(h_flex().gap_2().child(button("accept-ticket", "Accept ticket", cx => this.act(cx, () => store.acceptTicket(t.id)))).child(button("dismiss-ticket", "Dismiss", cx => this.act(cx, async () => { await store.dismissTicket(t.id); this.ticketId = null; }))));
-    if (t.pendingStage) body.child(this.pendingMove(t, cx, "detail"));
+    if (t.pendingStage) body.child(this.renderPendingMove(t, cx, "detail"));
     const failed = this.handoffFailure(t, cx, "detail");
     if (failed) body.child(failed);
     body.child(new Markdown(`description:${t.id}`, t.description || "No description"));
@@ -759,7 +763,11 @@ export class BoardPanel extends WatchedView {
         const options = { persona: this.persona || null, prompt: this.prompt.value() };
         if (this.form === "start") await handoff.startThread(this.ticketId, options);
         else {
-          if (this.pendingMove) await store.moveTicket(this.pendingMove.id, this.pendingMove.stage);
+          if (this.pendingMove) {
+            const moved = await store.moveTicket(this.pendingMove.id, this.pendingMove.stage);
+            const warning = moveWarning(moved);
+            if (warning) this.note = warning;
+          }
           await handoff.startHandoff(this.ticketId, { ...options, sourceThreadIds: [...this.sourceIds], consolidate: this.form === "consolidate" });
         }
         this.form = null; this.pendingMove = null;

@@ -1,7 +1,10 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canNest, dropOnCard, dropOnColumn, dropOnLoose, handoffSteps, needsYou, planHandoff, planMove } from "./model.js";
+import {
+  canNest, dropOnCard, dropOnColumn, dropOnLoose, failInterruptedHandoff, handoffSteps, moveWarning,
+  needsYou, pendingMoveControls, planHandoff, planMove, SETTLE_AFTER_SPAWN,
+} from "./model.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
 
@@ -94,8 +97,10 @@ test("a move with live threads confirms Done and offers a handoff before it arch
 test("a handoff retry finishes cleanup and does not spawn again", () => {
   const live = { thr_a: { onTicket: true, archived: false }, thr_b: { onTicket: true, archived: false } };
   const spawned = planHandoff({ sources: ["thr_a", "thr_b"], threads: live });
-  assert.deepEqual(handoffSteps(spawned), ["comment", "spawn", "save-next", "archive"]);
+  assert.deepEqual(handoffSteps(spawned), ["comment", "spawn", "archive"]);
   assert.deepEqual(spawned.archive, ["thr_a", "thr_b"]);
+  assert.ok(SETTLE_AFTER_SPAWN.includes("attach"));
+  assert.ok(SETTLE_AFTER_SPAWN.includes("toast"));
   assert.equal(planHandoff({ sources: ["thr_a"], threads: { thr_a: { onTicket: true, archived: true } } }).action, "refuse");
   const resume = planHandoff({
     sources: ["thr_a", "thr_b"],
@@ -105,5 +110,40 @@ test("a handoff retry finishes cleanup and does not spawn again", () => {
   assert.equal(resume.action, "resume");
   assert.equal(resume.nextThreadId, "thr_next");
   assert.deepEqual(resume.archive, ["thr_b"]);
-  assert.deepEqual(handoffSteps(resume), ["archive"]);
+  assert.deepEqual(handoffSteps(resume), ["finish-successor", "archive"]);
+});
+
+test("a proposed move still has Accept, Dismiss and Won't do after the board sets pendingMove", async () => {
+  const proposed = { ...elsewhere, pendingStage: "review" };
+  const done = { ...elsewhere, pendingStage: "done" };
+  assert.deepEqual(pendingMoveControls(proposed, "card:tkt_3"), {
+    prompt: "Move to Review?",
+    actions: [
+      { id: "card:tkt_3:accept-move", label: "Accept" },
+      { id: "card:tkt_3:dismiss-move", label: "Dismiss" },
+    ],
+  });
+  assert.deepEqual(pendingMoveControls(done, "detail").actions.map(a => a.label), ["Accept", "Dismiss", "Won't do"]);
+  assert.equal(pendingMoveControls(elsewhere, "card:tkt_3"), null);
+  const { readFileSync } = await import("node:fs");
+  const views = readFileSync(new URL("./views.js", import.meta.url), "utf8");
+  assert.match(views, /renderPendingMove\(/);
+  assert.match(views, /this\.pendingMove = null/);
+  assert.equal(/^\s*pendingMove\(/m.test(views), false);
+});
+
+test("an interrupted running handoff becomes a failed job Retry can finish", () => {
+  const running = { ticket_id: "tkt_1", status: "running", error: null, next_thread_id: "thr_next" };
+  const failed = failInterruptedHandoff(running);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error, "Interrupted before the handoff finished");
+  assert.equal(failed.next_thread_id, "thr_next");
+  assert.equal(failInterruptedHandoff({ ...running, error: "toast failed" }).error, "toast failed");
+  assert.equal(failInterruptedHandoff({ ...running, status: "failed" }).status, "failed");
+});
+
+test("a handoff move keeps the same WIP and blocker warning as a plain move", () => {
+  assert.equal(moveWarning({ warning: "Still blocked by #2" }), "Still blocked by #2");
+  assert.equal(moveWarning({ id: "tkt_1" }), "");
+  assert.equal(moveWarning(null), "");
 });

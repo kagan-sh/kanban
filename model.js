@@ -139,11 +139,42 @@ export function planHandoff(input) {
   return { action: "spawn", archive: ids };
 }
 
-/** Spawn saves the successor before any source is archived, so a retry can finish the cleanup. */
+/**
+ * Spawn saves the successor id before attach, env, open or toast.
+ * Resume finishes that work, then archives sources that are still live.
+ */
 export function handoffSteps(plan) {
-  if (plan.action === "resume") return ["archive"];
-  if (plan.action === "spawn") return ["comment", "spawn", "save-next", "archive"];
+  if (plan.action === "resume") return ["finish-successor", "archive"];
+  if (plan.action === "spawn") return ["comment", "spawn", "archive"];
   return [];
+}
+
+/** Work that must not run before the successor id is saved. */
+export const SETTLE_AFTER_SPAWN = ["attach", "env", "open", "toast"];
+
+/** Controls for a proposed stage move on a card or ticket page. */
+export function pendingMoveControls(ticket, prefix) {
+  if (!ticket.pendingStage) return null;
+  const actions = [
+    { id: `${prefix}:accept-move`, label: "Accept" },
+    { id: `${prefix}:dismiss-move`, label: "Dismiss" },
+  ];
+  if (ticket.pendingStage === "done") actions.push({ id: `${prefix}:wont`, label: "Won't do" });
+  return { prompt: `Move to ${TITLES[ticket.pendingStage]}?`, actions };
+}
+
+/** WIP and blocker notes from a successful move. */
+export function moveWarning(moved) {
+  return moved && typeof moved.warning === "string" ? moved.warning : "";
+}
+
+/** A handoff left as running when the process died becomes a failed job Retry can finish. */
+export function failInterruptedHandoff(row) {
+  if (String(row.status) !== "running") return row;
+  const error = row.error == null || String(row.error).trim() === ""
+    ? "Interrupted before the handoff finished"
+    : String(row.error);
+  return { ...row, status: "failed", error };
 }
 
 /** @param {string} title */
