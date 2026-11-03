@@ -1,7 +1,7 @@
 // @ts-check
 import { migrate, query, run, transaction } from "kagan/database";
 import * as threads from "kagan/threads";
-import { stage, text, KINDS, BUG_TEMPLATE, isGated, startProblem, acceptanceCriteria, daysInStage, rankFor, rankOrder, looksLikeUserStory, USER_STORY_WARNING } from "./model.js";
+import { stage, text, KINDS, BUG_TEMPLATE, isGated, startProblem, acceptanceCriteria, daysInStage, rankFor, rankOrder, looksLikeUserStory, USER_STORY_WARNING, failInterruptedHandoff } from "./model.js";
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -53,7 +53,15 @@ export function ready() {
   return migrated ??= migrate(statements).catch(error => {
     if (!String(error).includes("cannot be changed")) throw error;
     return migrate(statements.map(sql => columnChecks[sql] ?? sql));
-  });
+  }).then(() => failInterruptedHandoffs());
+}
+
+async function failInterruptedHandoffs() {
+  const rows = await query("SELECT * FROM handoff WHERE status = ?", ["running"]);
+  for (const row of rows) {
+    const next = failInterruptedHandoff(row);
+    await run("UPDATE handoff SET status = ?, error = ? WHERE ticket_id = ?", [next.status, next.error, row.ticket_id]);
+  }
 }
 
 export function touch() {
