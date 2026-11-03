@@ -8,7 +8,7 @@ import * as store from "./store.js";
 import * as handoff from "./handoff.js";
 import * as github from "./github.js";
 import { listPersonas } from "./personas.js";
-import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, needsYou, matches, sidebarRows, AGE_WARN_DAYS, isGated, startProblem, daysInStage, sortColumn, openBlockers, canBlock, subTicketLine, threadStatusLine, criteriaLine, rankOrder, looksLikeUserStory, USER_STORY_WARNING, KINDS, dropOnCard, dropOnColumn, dropOnLoose, threadMatches } from "./model.js";
+import { STAGES, TITLES, PERSONAS, GLYPHS, NEXT, needsYou, matches, sidebarRows, AGE_WARN_DAYS, startProblem, daysInStage, sortColumn, openBlockers, canBlock, subTicketLine, threadStatusLine, criteriaLine, rankOrder, looksLikeUserStory, USER_STORY_WARNING, KINDS, dropOnCard, dropOnColumn, dropOnLoose, threadMatches, planMove } from "./model.js";
 
 function clickCx(a, b) { return b ?? a; }
 function button(id, label, callback) {
@@ -29,6 +29,9 @@ function select(id, rows, label, callback) {
   return new Select(id, () => rows, row => div().child(String(/** @type {{label: string}} */ (row).label)), callback).placeholder(label);
 }
 function boardLink(projectId, ticketId) { return host.openPanel("board", { projectId, ticketId }); }
+function requestBoardMove(ticket, stage) {
+  return host.openPanel("board", { projectId: ticket.projectId, ticketId: ticket.id, move: stage, moveAt: Date.now() });
+}
 function followContext(cx) { return cx.spawn(async cx => { for (;;) { await host.onContextChanged(); cx.notify(); } }); }
 
 class WatchedView extends View {
@@ -148,7 +151,7 @@ export class BoardPanel extends WatchedView {
     const props = context.props;
     if (props?.projectId) this.projectId = props.projectId;
     if (props && Object.hasOwn(props, "ticketId")) this.ticketId = props.ticketId ?? null;
-    const request = props?.move ? `${props.ticketId}:${props.move}` : null;
+    const request = props?.move ? `${props.ticketId}:${props.move}:${props.moveAt ?? ""}` : null;
     if (request !== this.lastMoveRequest) { this.requestedMove = props?.move; this.lastMoveRequest = request; }
   }
   consumeMove(cx) {
@@ -331,40 +334,36 @@ export class BoardPanel extends WatchedView {
     if (form === "handoff") this.sourceIds = new Set(ticket?.threads.slice(0, 1).map(t => t.id));
   }
   move(ticket, stage, cx, resolution = "done") {
-    if (ticket.stage === stage && (stage !== "done" || (ticket.resolution ?? "done") === resolution)) return;
-    const problem = isGated(ticket.stage, stage, resolution) ? startProblem(ticket) : null;
-    if (problem) {
-      this.error = `Can't start #${ticket.number}: ${problem}.`;
-      cx.notify();
-      return;
-    }
-    if (stage === "done" && ticket.stage !== "done" && ticket.threads.length) {
-      const wont = resolution === "wont-do";
+    const plan = planMove(ticket, stage, resolution);
+    if (plan.action === "ignore") return;
+    if (plan.action === "refuse") { this.error = plan.reason; cx.notify(); return; }
+    if (plan.action === "confirm-done") {
+      const wont = plan.resolution === "wont-do";
       window.open_dialog(() => v_flex().gap_3()
         .child(`Move #${ticket.number} to Done${wont ? " as won't do" : ""}?`)
         .child("This archives every live thread on the ticket. Moving it out of Done brings back the threads this move archived. Won't do ends the ticket the same way.")
         .child(h_flex().gap_2().flex_wrap()
           .child(button(`cancel-done:${ticket.id}`, "Cancel", () => window.close_dialog()))
           .child(button(`alt-done:${ticket.id}`, wont ? "Move to Done and archive threads" : "Archive as won't do", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, "done", wont ? "done" : "wont-do"); }))
-          .child(primary(`confirm-done:${ticket.id}`, wont ? "Archive as won't do" : "Move to Done and archive threads", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, "done", resolution); }))));
+          .child(primary(`confirm-done:${ticket.id}`, wont ? "Archive as won't do" : "Move to Done and archive threads", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, "done", plan.resolution); }))));
       return;
     }
-    if (resolution !== "wont-do" && ["in-progress", "review"].includes(stage) && ticket.threads.length) {
+    if (plan.action === "handoff") {
       window.open_dialog(() => v_flex().gap_3()
-        .child(`Move #${ticket.number} to ${TITLES[stage]}?`)
+        .child(`Move #${ticket.number} to ${TITLES[plan.stage]}?`)
         .child("Move keeps the current threads. Hand off starts a new thread and archives the ones you pick.")
         .child(h_flex().gap_2().flex_wrap()
           .child(button(`cancel-move:${ticket.id}`, "Cancel", () => window.close_dialog()))
           .child(button(`handoff-move:${ticket.id}`, "Hand off…", cx => {
             window.close_dialog();
-            this.pendingMove = { id: ticket.id, stage };
+            this.pendingMove = { id: ticket.id, stage: plan.stage };
             this.ticketId = ticket.id;
-            this.act(cx, async () => { await this.prepare("handoff", ticket); this.persona = this.personas.includes(PERSONAS[stage]) ? PERSONAS[stage] : ""; });
+            this.act(cx, async () => { await this.prepare("handoff", ticket); this.persona = this.personas.includes(PERSONAS[plan.stage]) ? PERSONAS[plan.stage] : ""; });
           }))
-          .child(button(`just-move:${ticket.id}`, "Move without starting a thread", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, stage, "done"); }))));
+          .child(button(`just-move:${ticket.id}`, "Move without starting a thread", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, plan.stage, "done"); }))));
       return;
     }
-    this.finishMove(cx, ticket.id, stage, resolution);
+    this.finishMove(cx, ticket.id, plan.stage, plan.resolution);
   }
   menu(ticket, _cx) {
     const menu = new DropdownMenu(`ticket-menu:${ticket.id}`, "···");
@@ -835,7 +834,7 @@ export class SidebarList extends WatchedView {
     if (ticket && !ticket.proposed) {
       for (const stage of STAGES) {
         if (stage === ticket.stage) continue;
-        line.child(button(`side-move:${row.id}:${stage}`, TITLES[stage], cx => this.act(cx, () => store.moveTicket(ticket.id, stage))));
+        line.child(button(`side-move:${row.id}:${stage}`, TITLES[stage], cx => this.act(cx, () => requestBoardMove(ticket, stage))));
       }
       if (ticket.stage !== "done") line.child(button(`side-start:${row.id}`, "Start thread", cx => this.act(cx, () => handoff.startThread(ticket.id, {}))));
     }
