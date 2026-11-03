@@ -106,7 +106,7 @@ export function isGated(from, to, resolution = "done") {
   return from === "backlog" && to !== "backlog" && !(to === "done" && resolution === "wont-do");
 }
 
-/** Decides the gate before a move; warnings still come from the move itself. */
+/** Gate only; WIP and blocker warnings come from the move. */
 export function planMove(ticket, stage, resolution = "done") {
   if (!STAGES.includes(stage)) return { action: "refuse", reason: `Unknown stage ${stage}` };
   if (resolution !== "done" && resolution !== "wont-do") return { action: "refuse", reason: "Unknown resolution" };
@@ -121,7 +121,6 @@ export function planMove(ticket, stage, resolution = "done") {
 }
 
 /**
- * Resume finishes settle when a successor already exists.
  * Sources stay live until Archive sources; collecting each source's handoff
  * needs host threads.send and threads.output, which are not on main yet.
  * @param {{ sources?: string[], nextThreadId?: string | null, threads: Record<string, { onTicket?: boolean, archived?: boolean }> }} input
@@ -169,9 +168,6 @@ export function withSettleStep(done, step) {
   return { ...done, [step]: true };
 }
 
-/**
- * Awaiting archival refuses a new handoff. A saved successor keeps its original options.
- */
 export function resolveHandoffOptions(options = {}, saved = null) {
   if (saved?.status === "awaiting-archive") {
     return { action: "refuse", reason: "Archive the previous handoff sources first" };
