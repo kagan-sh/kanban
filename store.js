@@ -338,7 +338,17 @@ export function writeHandoffFailure(id, options, error) {
 export async function deleteHandoff(id) {
   await ready();
   await run("DELETE FROM handoff WHERE ticket_id = ?", [id]);
+  await run("DELETE FROM kv WHERE key = ?", [`handoff-settle:${id}`]);
   touch();
+}
+
+export async function readSettleProgress(id) {
+  const raw = await kvJson(`handoff-settle:${id}`, {});
+  return raw && typeof raw === "object" ? raw : {};
+}
+
+export async function writeSettleProgress(id, progress) {
+  await kvSet(`handoff-settle:${id}`, JSON.stringify(progress ?? {}));
 }
 
 export function moveTicket(id, wanted, resolution = "done") {

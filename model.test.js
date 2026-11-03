@@ -2,9 +2,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  canNest, dropOnCard, dropOnColumn, dropOnLoose, failInterruptedHandoff, handoffSteps, moveWarning,
-  needsYou, pendingMoveControls, planHandoff, planMove, resolveHandoffOptions, SETTLE_AFTER_SPAWN,
-  threadStartupInput,
+  canNest, commentWhen, descriptionPreview, dropOnCard, dropOnColumn, dropOnLoose, failInterruptedHandoff,
+  handoffSteps, moveWarning, needsYou, pendingMoveControls, planHandoff, planMove, remainingSettleSteps,
+  resolveHandoffOptions, SETTLE_AFTER_SPAWN, threadStartupInput, withSettleStep,
 } from "./model.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
@@ -117,6 +117,7 @@ test("a handoff retry finishes cleanup and does not spawn again", () => {
 
 test("resubmitting a failed handoff resumes the saved successor instead of spawning again", () => {
   const saved = {
+    status: "failed",
     sources: ["thr_a"],
     persona: "implementer",
     prompt: "Continue",
@@ -124,6 +125,7 @@ test("resubmitting a failed handoff resumes the saved successor instead of spawn
     nextThreadId: "thr_next",
   };
   const merged = resolveHandoffOptions({ sourceThreadIds: ["thr_a"], persona: "implementer", prompt: "Continue" }, saved);
+  assert.equal(merged.action, "resume");
   assert.equal(merged.nextThreadId, "thr_next");
   assert.equal(planHandoff({
     sources: merged.sourceThreadIds,
@@ -131,6 +133,37 @@ test("resubmitting a failed handoff resumes the saved successor instead of spawn
     threads: { thr_a: { onTicket: true, archived: false } },
   }).action, "resume");
   assert.deepEqual(handoffSteps({ action: "resume", nextThreadId: "thr_next", archive: ["thr_a"] }), ["finish-successor"]);
+});
+
+test("a new handoff while archival awaits keeps the saved sources and refuses a successor as a source", () => {
+  const awaiting = {
+    status: "awaiting-archive",
+    sources: ["thr_a"],
+    persona: "implementer",
+    prompt: "Continue",
+    consolidate: false,
+    nextThreadId: "thr_b",
+  };
+  assert.equal(resolveHandoffOptions({ sourceThreadIds: ["thr_b"], prompt: "Next" }, awaiting).action, "refuse");
+  const resume = resolveHandoffOptions({ sourceThreadIds: ["thr_b"] }, { ...awaiting, status: "failed", nextThreadId: "thr_b" });
+  assert.equal(resume.action, "resume");
+  assert.deepEqual(resume.sourceThreadIds, ["thr_a"]);
+  assert.equal(resume.prompt, "Continue");
+  assert.equal(planHandoff({
+    sources: ["thr_b"],
+    nextThreadId: "thr_b",
+    threads: { thr_b: { onTicket: true, archived: false } },
+  }).action, "refuse");
+});
+
+test("retry skips paste after a later toast failure", () => {
+  const afterPaste = withSettleStep(withSettleStep({}, "attached"), "pasted");
+  assert.deepEqual(remainingSettleSteps(afterPaste), ["env", "opened", "toasted"]);
+  assert.ok(!remainingSettleSteps(afterPaste).includes("pasted"));
+  assert.deepEqual(
+    remainingSettleSteps(withSettleStep(withSettleStep(withSettleStep(withSettleStep(withSettleStep({}, "attached"), "env"), "opened"), "pasted"), "toasted")),
+    [],
+  );
 });
 
 test("a finished handoff leaves sources live until Archive sources", () => {
@@ -187,4 +220,12 @@ test("a handoff move keeps the same WIP and blocker warning as a plain move", ()
   assert.equal(moveWarning({ warning: "Still blocked by #2" }), "Still blocked by #2");
   assert.equal(moveWarning({ id: "tkt_1" }), "");
   assert.equal(moveWarning(null), "");
+});
+
+test("a proposed card shows a short description, and comments show when they were written", () => {
+  assert.equal(descriptionPreview("Ship it."), "Ship it.");
+  assert.equal(descriptionPreview("x".repeat(300)).endsWith("…"), true);
+  assert.equal(descriptionPreview("   "), null);
+  assert.equal(commentWhen(Date.UTC(2026, 10, 3)), new Date(Date.UTC(2026, 10, 3)).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
+  assert.equal(commentWhen(null), "");
 });

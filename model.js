@@ -129,8 +129,11 @@ export function planMove(ticket, stage, resolution = "done") {
 export function planHandoff(input) {
   const ids = [...new Set(input.sources ?? [])];
   const nextThreadId = input.nextThreadId || null;
+  if (nextThreadId && ids.includes(nextThreadId)) {
+    return { action: "refuse", reason: "The new thread cannot be one of its own sources", archive: [] };
+  }
   if (nextThreadId) {
-    const archive = ids.filter(id => input.threads[id]?.onTicket && !input.threads[id]?.archived);
+    const archive = ids.filter(id => id !== nextThreadId && input.threads[id]?.onTicket && !input.threads[id]?.archived);
     return { action: "resume", nextThreadId, archive };
   }
   if (!ids.length || ids.length > 50) return { action: "refuse", reason: "Pick between 1 and 50 source threads", archive: [] };
@@ -155,18 +158,62 @@ export function handoffSteps(plan) {
 /** Work that must not run before the successor id is saved. */
 export const SETTLE_AFTER_SPAWN = ["attach", "env", "open", "paste", "toast"];
 
-/** Merge a resubmitted form with a saved job so a second submit does not spawn again. */
+/** Settle steps recorded after each succeeds, so Retry skips finished work. */
+export const SETTLE_STEPS = ["attached", "env", "opened", "pasted", "toasted"];
+
+export function remainingSettleSteps(done = {}) {
+  return SETTLE_STEPS.filter(step => !done[step]);
+}
+
+export function withSettleStep(done, step) {
+  return { ...done, [step]: true };
+}
+
+/**
+ * Merge a resubmitted form with a saved job.
+ * Awaiting archival refuses a new handoff. A saved successor keeps its original options.
+ */
 export function resolveHandoffOptions(options = {}, saved = null) {
-  const sources = options.sourceThreadIds?.length
-    ? options.sourceThreadIds
-    : (saved?.sources ?? []);
+  if (saved?.status === "awaiting-archive") {
+    return { action: "refuse", reason: "Archive the previous handoff sources first" };
+  }
+  if (saved?.nextThreadId) {
+    const sources = [...new Set(saved.sources ?? [])].filter(id => id !== saved.nextThreadId);
+    return {
+      action: "resume",
+      persona: saved.persona ?? null,
+      prompt: saved.prompt ?? "",
+      consolidate: Boolean(saved.consolidate),
+      sourceThreadIds: sources,
+      nextThreadId: saved.nextThreadId,
+    };
+  }
+  const sources = [...new Set(options.sourceThreadIds ?? [])];
+  const nextThreadId = options.nextThreadId ?? null;
+  if (nextThreadId && sources.includes(nextThreadId)) {
+    return { action: "refuse", reason: "The new thread cannot be one of its own sources" };
+  }
   return {
-    persona: options.persona !== undefined ? options.persona : (saved?.persona ?? null),
-    prompt: options.prompt !== undefined ? options.prompt : (saved?.prompt ?? ""),
-    consolidate: options.consolidate ?? saved?.consolidate ?? false,
-    sourceThreadIds: [...new Set(sources)],
-    nextThreadId: options.nextThreadId ?? saved?.nextThreadId ?? null,
+    action: "spawn",
+    persona: options.persona ?? null,
+    prompt: options.prompt ?? "",
+    consolidate: Boolean(options.consolidate),
+    sourceThreadIds: sources,
+    nextThreadId: null,
   };
+}
+
+/** Short description shown on a proposed ticket card. */
+export function descriptionPreview(text, max = 240) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) return null;
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max).trimEnd()}…`;
+}
+
+/** Short date for a comment header. */
+export function commentWhen(ms) {
+  if (ms == null || !Number.isFinite(Number(ms))) return "";
+  return new Date(Number(ms)).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 /** Text pasted into a new thread. The person still presses Enter to send it. */

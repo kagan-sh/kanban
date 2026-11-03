@@ -4,7 +4,7 @@ import { run as exec } from "kagan/process";
 import * as threads from "kagan/threads";
 import { openThread, pasteIntoThread, settings, toast } from "kagan/host";
 import { personaBody } from "./personas.js";
-import { handoffSteps, planHandoff, resolveHandoffOptions, threadStartupInput } from "./model.js";
+import { handoffSteps, planHandoff, resolveHandoffOptions, threadStartupInput, withSettleStep } from "./model.js";
 import * as store from "./store.js";
 
 export const HANDOFF_INSTRUCTIONS = `Write a standalone handoff as a ticket comment with kg kanban ticket comment. Start with ## Handoff, then ### Goal and ### Current State (both required). Include Context, What Changed, Decisions Made, Open Questions, and Next Steps as ### sections when useful. State only what actually happened, with decisions, reasons, paths, constraints and concrete next actions. Drop retries and long tool output. Write in the third person.`;
@@ -22,28 +22,48 @@ export function extractHandoff(output) {
 /** Attach, env, open, paste and toast for a thread that already exists. */
 async function settleSpawnedThread(ticket, thread, options = {}) {
   const persona = options.persona ?? null;
-  const links = await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [ticket.id]);
-  if (!links.some((row) => String(row.thread_id) === thread.id)) {
-    await store.attachInner(ticket.id, thread.id, persona);
-  }
-  const fresh = await threads.get(thread.id);
-  if (fresh.environmentId) {
-    const env = await threads.environment(fresh.environmentId);
-    if (env.provider === "worktree") {
-      await run("UPDATE ticket SET environment_id = ? WHERE id = ? AND environment_id IS NULL", [env.id, ticket.id]);
+  let progress = { ...(options.progress ?? {}) };
+  const save = async (step) => {
+    progress = withSettleStep(progress, step);
+    if (options.onProgress) await options.onProgress(progress);
+  };
+
+  if (!progress.attached) {
+    const links = await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [ticket.id]);
+    if (!links.some((row) => String(row.thread_id) === thread.id)) {
+      await store.attachInner(ticket.id, thread.id, persona);
     }
+    await save("attached");
   }
-  await openThread(thread.id);
-  const personaText = options.personaText !== undefined ? options.personaText : await personaBody(persona);
-  const input = threadStartupInput({ personaText, prompt: options.prompt ?? "", ticketId: ticket.id });
-  // threads.send (feat/hook-send, in review) will replace pasteIntoThread once it lands.
-  await pasteIntoThread(thread.id, input);
-  if (options.announce !== false) {
+  if (!progress.env) {
+    const fresh = await threads.get(thread.id);
+    if (fresh.environmentId) {
+      const env = await threads.environment(fresh.environmentId);
+      if (env.provider === "worktree") {
+        await run("UPDATE ticket SET environment_id = ? WHERE id = ? AND environment_id IS NULL", [env.id, ticket.id]);
+      }
+    }
+    await save("env");
+  }
+  if (!progress.opened) {
+    await openThread(thread.id);
+    await save("opened");
+  }
+  if (!progress.pasted) {
+    const personaText = options.personaText !== undefined ? options.personaText : await personaBody(persona);
+    const input = threadStartupInput({ personaText, prompt: options.prompt ?? "", ticketId: ticket.id });
+    // threads.send (feat/hook-send, in review) will replace pasteIntoThread once it lands.
+    await pasteIntoThread(thread.id, input);
+    await save("pasted");
+  }
+  if (options.announce !== false && !progress.toasted) {
     await toast(`Started #${ticket.number}. Press Enter in the new thread to send the pasted prompt.`);
+    await save("toasted");
   }
+  return progress;
 }
 
-/** @param {any} ticket @param {{persona?: string | null, prompt?: string, onSpawned?: (thread: any) => Promise<void> | void}} [options] */
+/** @param {any} ticket @param {{persona?: string | null, prompt?: string, onSpawned?: (thread: any) => Promise<void> | void, progress?: Record<string, boolean>, onProgress?: (progress: Record<string, boolean>) => Promise<void> | void}} [options] */
 export async function spawnForTicket(ticket, options = {}) {
   const personaText = await personaBody(options.persona);
   const program = String(settings().defaultProgram || "claude");
@@ -85,6 +105,8 @@ export async function spawnForTicket(ticket, options = {}) {
     prompt: options.prompt ?? "",
     personaText,
     announce: true,
+    progress: options.progress,
+    onProgress: options.onProgress,
   });
   return thread;
 }
@@ -101,6 +123,7 @@ export function startHandoff(id, options = {}) {
   return store.serial(async () => {
     const saved = await store.readHandoff(id);
     const merged = resolveHandoffOptions(options, saved);
+    if (merged.action === "refuse") throw new Error(merged.reason);
     let nextThreadId = merged.nextThreadId;
     try {
       const next = await runHandoff(id, merged, (spawned) => { nextThreadId = spawned; });
@@ -141,6 +164,8 @@ async function runHandoff(id, options, onSpawned) {
   if (plan.action === "refuse") throw new Error(plan.reason);
   const persona = options.persona ?? null;
   const prompt = options.prompt ?? "";
+  const progress = await store.readSettleProgress(id);
+  const onProgress = (next) => store.writeSettleProgress(id, next);
   let next = null;
   for (const step of handoffSteps(plan)) {
     if (step === "comment") {
@@ -161,6 +186,8 @@ async function runHandoff(id, options, onSpawned) {
       next = await spawnForTicket(ticket, {
         persona,
         prompt,
+        progress,
+        onProgress,
         onSpawned: async (thread) => {
           onSpawned(thread.id);
           await store.saveHandoffProgress(id, { ...options, sourceThreadIds: ids, nextThreadId: thread.id });
@@ -168,7 +195,13 @@ async function runHandoff(id, options, onSpawned) {
       });
     } else if (step === "finish-successor") {
       next = await threads.get(plan.nextThreadId);
-      await settleSpawnedThread(ticket, next, { persona, prompt, announce: false });
+      await settleSpawnedThread(ticket, next, {
+        persona,
+        prompt,
+        announce: false,
+        progress,
+        onProgress,
+      });
     }
   }
   store.touch();
@@ -199,6 +232,7 @@ export function archiveSources(id) {
     const job = await store.readHandoff(id);
     if (!job || job.status !== "awaiting-archive") throw new Error("No sources waiting to archive");
     for (const threadId of job.sources) {
+      if (threadId === job.nextThreadId) continue;
       const thread = await threads.get(threadId).catch(() => null);
       if (!thread || thread.archivedAt !== null) continue;
       await threads.archive(threadId);
