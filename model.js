@@ -207,6 +207,123 @@ export function criteriaLine(description, kind) {
   return `AC ${counted.done}/${counted.total}`;
 }
 
+/** @param {{title?: string, id?: string}} thread @param {string} search */
+export function threadMatches(thread, search) {
+  const needle = search.trim().toLowerCase();
+  if (!needle) return true;
+  return `${thread.title ?? ""} ${thread.id ?? ""}`.toLowerCase().includes(needle);
+}
+
+/** @param {string} payload */
+export function parseDrag(payload) {
+  const text = String(payload ?? "");
+  const split = text.indexOf(":");
+  if (split < 1) return null;
+  const kind = text.slice(0, split);
+  const id = text.slice(split + 1);
+  if ((kind !== "ticket" && kind !== "thread") || !id) return null;
+  return { kind, id };
+}
+
+const IGNORE = { action: "ignore", label: "" };
+
+/** @param {string} reason */
+function refuse(reason) {
+  return { action: "refuse", reason, label: reason };
+}
+
+/** @param {readonly {id: string, projectId: string, proposed?: boolean, parentId?: string | null}[]} tickets @param {string} childId @param {string} parentId */
+export function canNest(tickets, childId, parentId) {
+  const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
+  const child = byId.get(childId);
+  const parent = byId.get(parentId);
+  if (!child || !parent || child.projectId !== parent.projectId || child.proposed || parent.proposed) return false;
+  for (let at = parent; at; at = at.parentId ? byId.get(at.parentId) : undefined) {
+    if (at.id === child.id) return false;
+  }
+  return true;
+}
+
+/** @param {string} threadId @param {readonly any[]} tickets @param {readonly any[]} loose */
+function projectOfThread(threadId, tickets, loose) {
+  for (const ticket of tickets) {
+    const thread = (ticket.threads ?? []).find(item => item.id === threadId);
+    if (thread) return thread.projectId ?? ticket.projectId;
+  }
+  return loose.find(thread => thread.id === threadId)?.projectId ?? null;
+}
+
+/** @param {any} ticket @param {string} stage */
+function moveDecision(ticket, stage) {
+  if (ticket.proposed) return refuse("Accept the proposed ticket first");
+  if (ticket.stage === stage) return IGNORE;
+  const problem = isGated(ticket.stage, stage, "done") ? startProblem(ticket) : null;
+  if (problem) return refuse(`Can't start #${ticket.number}: ${problem}.`);
+  return { action: "move", id: ticket.id, stage, label: `Drop to move to ${TITLES[stage]}` };
+}
+
+/** @param {string} threadId @param {any} card @param {readonly any[]} tickets @param {readonly any[]} loose */
+function dropThreadOnCard(threadId, card, tickets, loose) {
+  if ((card.threads ?? []).some(thread => thread.id === threadId)) return IGNORE;
+  if (card.proposed || card.stage === "done") return refuse("Accept or reopen the ticket before attaching a thread");
+  const projectId = projectOfThread(threadId, tickets, loose);
+  if (projectId && projectId !== card.projectId) return refuse("Attach a thread from the same project as the ticket");
+  return { action: "attach", ticketId: card.id, threadId, label: "Drop to add the thread" };
+}
+
+/**
+ * A card is the innermost target, so a drop it does not want becomes the column's move.
+ * Top and bottom of a Backlog card rank; the middle nests when that is allowed.
+ * @param {string} payload @param {"top"|"middle"|"bottom"|null} side @param {any} card @param {readonly any[]} tickets @param {readonly any[]} [loose]
+ */
+export function dropOnCard(payload, side, card, tickets, loose = []) {
+  if (!side) return IGNORE;
+  const parsed = parseDrag(payload);
+  if (!parsed || !card) return IGNORE;
+  if (parsed.kind === "thread") return dropThreadOnCard(parsed.id, card, tickets, loose);
+  const dragged = tickets.find(ticket => ticket.id === parsed.id);
+  if (!dragged || dragged.id === card.id) return IGNORE;
+  if (dragged.proposed) return refuse("Accept the proposed ticket first");
+  if (side !== "middle" && dragged.stage === "backlog" && card.stage === "backlog" && dragged.projectId === card.projectId && !card.proposed) {
+    const above = side === "top";
+    return {
+      action: "rank",
+      id: dragged.id,
+      place: above ? { before: card.id } : { after: card.id },
+      label: `Drop to rank it ${above ? "above" : "below"} #${card.number}`,
+    };
+  }
+  if (side === "middle" && canNest(tickets, dragged.id, card.id)) {
+    return { action: "nest", id: dragged.id, parentId: card.id, label: "Drop to make it a sub-ticket" };
+  }
+  return moveDecision(dragged, card.stage);
+}
+
+/** @param {string} payload @param {string} stage @param {readonly any[]} tickets */
+export function dropOnColumn(payload, stage, tickets) {
+  const parsed = parseDrag(payload);
+  if (!parsed || !STAGES.includes(stage)) return IGNORE;
+  if (parsed.kind === "thread") {
+    if (stage === "done") return refuse("Create a ticket before moving it to Done");
+    const home = tickets.find(ticket => (ticket.threads ?? []).some(thread => thread.id === parsed.id));
+    if (home?.stage === stage) return IGNORE;
+    const label = stage === "backlog" ? "Drop to make a ticket" : `Drop to make a ticket in ${TITLES[stage]}`;
+    return { action: "create", threadId: parsed.id, stage, label };
+  }
+  const dragged = tickets.find(ticket => ticket.id === parsed.id);
+  if (!dragged) return IGNORE;
+  return moveDecision(dragged, stage);
+}
+
+/** @param {string} payload @param {readonly any[]} tickets */
+export function dropOnLoose(payload, tickets) {
+  const parsed = parseDrag(payload);
+  if (!parsed || parsed.kind !== "thread") return IGNORE;
+  const home = tickets.find(ticket => (ticket.threads ?? []).some(thread => thread.id === parsed.id));
+  if (!home) return IGNORE;
+  return { action: "detach", threadId: parsed.id, label: "Drop to take it off its ticket" };
+}
+
 export function sidebarRows(projects, tickets, live, activeProject, expanded, collapsed, frozen = []) {
   const byId = new Map(live.filter(t => !t.archivedAt && t.visibility !== "hidden").map(t => [t.id, t]));
   const linked = new Set(tickets.flatMap(t => t.links.map(l => l.threadId)));
