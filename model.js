@@ -105,6 +105,47 @@ export function isGated(from, to, resolution = "done") {
   return from === "backlog" && to !== "backlog" && !(to === "done" && resolution === "wont-do");
 }
 
+/** What a move must ask before it changes the ticket. Warnings still come from the move itself. */
+export function planMove(ticket, stage, resolution = "done") {
+  if (!STAGES.includes(stage)) return { action: "refuse", reason: `Unknown stage ${stage}` };
+  if (resolution !== "done" && resolution !== "wont-do") return { action: "refuse", reason: "Unknown resolution" };
+  if (resolution === "wont-do" && stage !== "done") return { action: "refuse", reason: "Won't do only applies to a move to Done" };
+  if (ticket.stage === stage && (stage !== "done" || (ticket.resolution ?? "done") === resolution)) return { action: "ignore" };
+  const problem = isGated(ticket.stage, stage, resolution) ? startProblem(ticket) : null;
+  if (problem) return { action: "refuse", reason: `Can't start #${ticket.number}: ${problem}.` };
+  const live = (ticket.threads ?? []).length > 0;
+  if (stage === "done" && ticket.stage !== "done" && live) return { action: "confirm-done", stage, resolution };
+  if (resolution !== "wont-do" && (stage === "in-progress" || stage === "review") && live) return { action: "handoff", stage, resolution };
+  return { action: "move", stage, resolution };
+}
+
+/**
+ * A handoff that already spawned its successor only archives sources that are still live.
+ * @param {{ sources?: string[], nextThreadId?: string | null, threads: Record<string, { onTicket?: boolean, archived?: boolean }> }} input
+ */
+export function planHandoff(input) {
+  const ids = [...new Set(input.sources ?? [])];
+  const nextThreadId = input.nextThreadId || null;
+  if (nextThreadId) {
+    const archive = ids.filter(id => input.threads[id]?.onTicket && !input.threads[id]?.archived);
+    return { action: "resume", nextThreadId, archive };
+  }
+  if (!ids.length || ids.length > 50) return { action: "refuse", reason: "Pick between 1 and 50 source threads", archive: [] };
+  for (const id of ids) {
+    const thread = input.threads[id];
+    if (!thread?.onTicket) return { action: "refuse", reason: "Every source must be on the ticket", archive: [] };
+    if (thread.archived) return { action: "refuse", reason: "Every source must be live", archive: [] };
+  }
+  return { action: "spawn", archive: ids };
+}
+
+/** Spawn saves the successor before any source is archived, so a retry can finish the cleanup. */
+export function handoffSteps(plan) {
+  if (plan.action === "resume") return ["archive"];
+  if (plan.action === "spawn") return ["comment", "spawn", "save-next", "archive"];
+  return [];
+}
+
 /** @param {string} title */
 export function looksLikeUserStory(title) {
   return /^\s*as an?\s/i.test(String(title ?? ""));

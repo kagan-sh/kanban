@@ -143,6 +143,7 @@ function handoffRecord(row) {
     persona: row.persona == null ? null : String(row.persona),
     prompt: row.prompt == null ? "" : String(row.prompt),
     consolidate: Number(row.consolidate) === 1,
+    nextThreadId: row.next_thread_id == null || row.next_thread_id === "" ? null : String(row.next_thread_id),
   };
 }
 
@@ -292,13 +293,12 @@ export async function readHandoff(id) {
   return { ...handoffRecord(rows[0]), sources };
 }
 
-export async function writeHandoffFailure(id, options, error) {
+async function upsertHandoff(id, options, status, error) {
   await ready();
-  const message = error instanceof Error ? error.message : String(error);
   await run(
-    `INSERT INTO handoff (ticket_id, persona, prompt, consolidate, status, error, next_thread_id) VALUES (?, ?, ?, ?, 'failed', ?, NULL)
-     ON CONFLICT(ticket_id) DO UPDATE SET persona = excluded.persona, prompt = excluded.prompt, consolidate = excluded.consolidate, status = 'failed', error = excluded.error`,
-    [id, options.persona ?? null, options.prompt ?? "", options.consolidate ? 1 : 0, message],
+    `INSERT INTO handoff (ticket_id, persona, prompt, consolidate, status, error, next_thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(ticket_id) DO UPDATE SET persona = excluded.persona, prompt = excluded.prompt, consolidate = excluded.consolidate, status = excluded.status, error = excluded.error, next_thread_id = COALESCE(excluded.next_thread_id, handoff.next_thread_id)`,
+    [id, options.persona ?? null, options.prompt ?? "", options.consolidate ? 1 : 0, status, error, options.nextThreadId ?? null],
   );
   const sources = [...new Set(options.sourceThreadIds ?? [])];
   if (sources.length) {
@@ -312,6 +312,15 @@ export async function writeHandoffFailure(id, options, error) {
     ]);
   }
   touch();
+}
+
+export function saveHandoffProgress(id, options) {
+  return upsertHandoff(id, options, "running", null);
+}
+
+export function writeHandoffFailure(id, options, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return upsertHandoff(id, options, "failed", message);
 }
 
 export async function deleteHandoff(id) {

@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canNest, dropOnCard, dropOnColumn, dropOnLoose, needsYou } from "./model.js";
+import { canNest, dropOnCard, dropOnColumn, dropOnLoose, handoffSteps, needsYou, planHandoff, planMove } from "./model.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
 
@@ -79,4 +79,31 @@ test("a failed handoff needs attention even when the error text is empty", () =>
   assert.equal(needsYou(quiet), false);
   assert.equal(needsYou({ ...quiet, handoff: { status: "failed", error: null } }), true);
   assert.equal(needsYou({ ...quiet, handoff: { status: "running", error: "The reply has no handoff" } }), true);
+});
+
+test("a move with live threads confirms Done and offers a handoff before it archives", () => {
+  const working = { ...elsewhere, threads: [{ id: "thr_a" }] };
+  assert.equal(planMove(working, "done").action, "confirm-done");
+  assert.equal(planMove(working, "review").action, "handoff");
+  assert.equal(planMove(working, "backlog").action, "move");
+  assert.equal(planMove({ ...elsewhere, threads: [] }, "done").action, "move");
+  assert.equal(planMove(gated, "in-progress").action, "refuse");
+  assert.equal(planMove(working, "in-progress").action, "ignore");
+});
+
+test("a handoff retry finishes cleanup and does not spawn again", () => {
+  const live = { thr_a: { onTicket: true, archived: false }, thr_b: { onTicket: true, archived: false } };
+  const spawned = planHandoff({ sources: ["thr_a", "thr_b"], threads: live });
+  assert.deepEqual(handoffSteps(spawned), ["comment", "spawn", "save-next", "archive"]);
+  assert.deepEqual(spawned.archive, ["thr_a", "thr_b"]);
+  assert.equal(planHandoff({ sources: ["thr_a"], threads: { thr_a: { onTicket: true, archived: true } } }).action, "refuse");
+  const resume = planHandoff({
+    sources: ["thr_a", "thr_b"],
+    nextThreadId: "thr_next",
+    threads: { thr_a: { onTicket: true, archived: true }, thr_b: { onTicket: true, archived: false } },
+  });
+  assert.equal(resume.action, "resume");
+  assert.equal(resume.nextThreadId, "thr_next");
+  assert.deepEqual(resume.archive, ["thr_b"]);
+  assert.deepEqual(handoffSteps(resume), ["archive"]);
 });

@@ -4,6 +4,7 @@ import { run as exec } from "kagan/process";
 import * as threads from "kagan/threads";
 import { openThread, settings, toast } from "kagan/host";
 import { personaBody } from "./personas.js";
+import { handoffSteps, planHandoff } from "./model.js";
 import * as store from "./store.js";
 
 export const HANDOFF_INSTRUCTIONS = `Write a standalone handoff as a ticket comment with kg kanban ticket comment. Start with ## Handoff, then ### Goal and ### Current State (both required). Include Context, What Changed, Decisions Made, Open Questions, and Next Steps as ### sections when useful. State only what actually happened, with decisions, reasons, paths, constraints and concrete next actions. Drop retries and long tool output. Write in the third person.`;
@@ -77,47 +78,78 @@ export function startThread(id, options = {}) {
 
 export function startHandoff(id, options) {
   return store.serial(async () => {
+    let nextThreadId = options.nextThreadId ?? null;
     try {
-      const next = await runHandoff(id, options);
+      const next = await runHandoff(id, options, (spawned) => { nextThreadId = spawned; });
       await store.deleteHandoff(id);
       return next;
     } catch (error) {
-      await store.writeHandoffFailure(id, options, error);
+      await store.writeHandoffFailure(id, { ...options, nextThreadId }, error);
       throw error;
     }
   });
 }
 
-async function runHandoff(id, options) {
+async function sourceThreads(id, ids) {
+  const links = await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [id]);
+  const linked = new Set(links.map((row) => String(row.thread_id)));
+  /** @type {Record<string, { onTicket: boolean, archived: boolean }>} */
+  const found = {};
+  for (const threadId of ids) {
+    if (!linked.has(threadId)) {
+      found[threadId] = { onTicket: false, archived: false };
+      continue;
+    }
+    const thread = await threads.get(threadId).catch(() => null);
+    found[threadId] = { onTicket: true, archived: !thread || thread.archivedAt !== null };
+  }
+  return found;
+}
+
+async function runHandoff(id, options, onSpawned) {
   const ticket = await store.ticketRow(id);
   if (ticket.proposed || ticket.stage === "done") throw new Error("Accept or reopen the ticket first");
   const ids = [...new Set(options.sourceThreadIds ?? [])];
-  if (!ids.length || ids.length > 50) throw new Error("Pick between 1 and 50 source threads");
-  const links = await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [id]);
-  for (const threadId of ids) {
-    if (!links.some((l) => l.thread_id === threadId)) throw new Error("Every source must be on the ticket");
-    const thread = await threads.get(threadId);
-    if (thread.archivedAt !== null) throw new Error("Every source must be live");
-  }
+  const plan = planHandoff({
+    sources: ids,
+    nextThreadId: options.nextThreadId ?? null,
+    threads: await sourceThreads(id, ids),
+  });
+  if (plan.action === "refuse") throw new Error(plan.reason);
   const persona = options.persona ?? null;
   const prompt = options.prompt ?? "";
-  const sources = ids.map((threadId) => `\`${threadId}\``).join(", ");
-  await store.addCommentInner(id, {
-    body: [
-      "## Handoff request",
-      "",
-      `Sources: ${sources}`,
-      persona ? `Persona: ${persona}` : null,
-      prompt ? `\n${prompt}` : null,
-      "",
-      HANDOFF_INSTRUCTIONS,
-    ].filter((line) => line !== null).join("\n"),
-    persona,
-  });
-  const next = await spawnForTicket(ticket, { persona, prompt });
-  for (const threadId of ids) await threads.archive(threadId);
+  let next = null;
+  for (const step of handoffSteps(plan)) {
+    if (step === "comment") {
+      const sources = ids.map((threadId) => `\`${threadId}\``).join(", ");
+      await store.addCommentInner(id, {
+        body: [
+          "## Handoff request",
+          "",
+          `Sources: ${sources}`,
+          persona ? `Persona: ${persona}` : null,
+          prompt ? `\n${prompt}` : null,
+          "",
+          HANDOFF_INSTRUCTIONS,
+        ].filter((line) => line !== null).join("\n"),
+        persona,
+      });
+    } else if (step === "spawn") {
+      next = await spawnForTicket(ticket, { persona, prompt });
+      onSpawned(next.id);
+    } else if (step === "save-next") {
+      if (!next) throw new Error("The handoff has no successor to save");
+      await store.saveHandoffProgress(id, { ...options, sourceThreadIds: ids, nextThreadId: next.id });
+    } else if (step === "archive") {
+      for (const threadId of plan.archive) await threads.archive(threadId);
+    }
+  }
   store.touch();
-  await toast(`Handoff on #${ticket.number} started a new thread`, { label: "Open board", command: "open-board" });
+  if (!next && plan.action === "resume") next = await threads.get(plan.nextThreadId);
+  await toast(
+    plan.action === "resume" ? `Handoff on #${ticket.number} finished` : `Handoff on #${ticket.number} started a new thread`,
+    { label: "Open board", command: "open-board" },
+  );
   return next;
 }
 
@@ -129,6 +161,7 @@ export async function retryHandoff(id) {
     persona: job.persona,
     prompt: job.prompt,
     consolidate: job.consolidate,
+    nextThreadId: job.nextThreadId,
   });
 }
 
