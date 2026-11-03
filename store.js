@@ -326,6 +326,10 @@ export function saveHandoffProgress(id, options) {
   return upsertHandoff(id, options, "running", null);
 }
 
+export function markHandoffAwaitingArchive(id, options) {
+  return upsertHandoff(id, options, "awaiting-archive", null);
+}
+
 export function writeHandoffFailure(id, options, error) {
   const message = error instanceof Error ? error.message : String(error);
   return upsertHandoff(id, options, "failed", message);

@@ -3,7 +3,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canNest, dropOnCard, dropOnColumn, dropOnLoose, failInterruptedHandoff, handoffSteps, moveWarning,
-  needsYou, pendingMoveControls, planHandoff, planMove, SETTLE_AFTER_SPAWN,
+  needsYou, pendingMoveControls, planHandoff, planMove, resolveHandoffOptions, SETTLE_AFTER_SPAWN,
+  threadStartupInput,
 } from "./model.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
@@ -97,9 +98,10 @@ test("a move with live threads confirms Done and offers a handoff before it arch
 test("a handoff retry finishes cleanup and does not spawn again", () => {
   const live = { thr_a: { onTicket: true, archived: false }, thr_b: { onTicket: true, archived: false } };
   const spawned = planHandoff({ sources: ["thr_a", "thr_b"], threads: live });
-  assert.deepEqual(handoffSteps(spawned), ["comment", "spawn", "archive"]);
+  assert.deepEqual(handoffSteps(spawned), ["comment", "spawn"]);
   assert.deepEqual(spawned.archive, ["thr_a", "thr_b"]);
   assert.ok(SETTLE_AFTER_SPAWN.includes("attach"));
+  assert.ok(SETTLE_AFTER_SPAWN.includes("paste"));
   assert.ok(SETTLE_AFTER_SPAWN.includes("toast"));
   assert.equal(planHandoff({ sources: ["thr_a"], threads: { thr_a: { onTicket: true, archived: true } } }).action, "refuse");
   const resume = planHandoff({
@@ -110,7 +112,46 @@ test("a handoff retry finishes cleanup and does not spawn again", () => {
   assert.equal(resume.action, "resume");
   assert.equal(resume.nextThreadId, "thr_next");
   assert.deepEqual(resume.archive, ["thr_b"]);
-  assert.deepEqual(handoffSteps(resume), ["finish-successor", "archive"]);
+  assert.deepEqual(handoffSteps(resume), ["finish-successor"]);
+});
+
+test("resubmitting a failed handoff resumes the saved successor instead of spawning again", () => {
+  const saved = {
+    sources: ["thr_a"],
+    persona: "implementer",
+    prompt: "Continue",
+    consolidate: false,
+    nextThreadId: "thr_next",
+  };
+  const merged = resolveHandoffOptions({ sourceThreadIds: ["thr_a"], persona: "implementer", prompt: "Continue" }, saved);
+  assert.equal(merged.nextThreadId, "thr_next");
+  assert.equal(planHandoff({
+    sources: merged.sourceThreadIds,
+    nextThreadId: merged.nextThreadId,
+    threads: { thr_a: { onTicket: true, archived: false } },
+  }).action, "resume");
+  assert.deepEqual(handoffSteps({ action: "resume", nextThreadId: "thr_next", archive: ["thr_a"] }), ["finish-successor"]);
+});
+
+test("a finished handoff leaves sources live until Archive sources", () => {
+  assert.equal(needsYou({ ...elsewhere, handoff: { status: "awaiting-archive", error: null } }), true);
+  assert.ok(!handoffSteps({ action: "spawn", archive: ["thr_a"] }).includes("archive"));
+  assert.ok(!handoffSteps({ action: "resume", nextThreadId: "thr_next", archive: ["thr_a"] }).includes("archive"));
+});
+
+test("the prompt and persona are pasted as thread input, not only the title", () => {
+  const text = threadStartupInput({
+    personaText: "# Implementer\nShip it.",
+    prompt: "Fix the flaky test",
+    ticketId: "tkt_3",
+  });
+  assert.match(text, /# Implementer/);
+  assert.match(text, /Fix the flaky test/);
+  assert.match(text, /kg kanban ticket show tkt_3/);
+  assert.equal(
+    threadStartupInput({ ticketId: "tkt_3" }),
+    "Run kg kanban ticket show tkt_3 first; read its description and comments.",
+  );
 });
 
 test("a proposed move still has Accept, Dismiss and Won't do after the board sets pendingMove", async () => {

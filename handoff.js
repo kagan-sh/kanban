@@ -2,9 +2,9 @@
 import { query, run } from "kagan/database";
 import { run as exec } from "kagan/process";
 import * as threads from "kagan/threads";
-import { openThread, settings, toast } from "kagan/host";
+import { openThread, pasteIntoThread, settings, toast } from "kagan/host";
 import { personaBody } from "./personas.js";
-import { handoffSteps, planHandoff } from "./model.js";
+import { handoffSteps, planHandoff, resolveHandoffOptions, threadStartupInput } from "./model.js";
 import * as store from "./store.js";
 
 export const HANDOFF_INSTRUCTIONS = `Write a standalone handoff as a ticket comment with kg kanban ticket comment. Start with ## Handoff, then ### Goal and ### Current State (both required). Include Context, What Changed, Decisions Made, Open Questions, and Next Steps as ### sections when useful. State only what actually happened, with decisions, reasons, paths, constraints and concrete next actions. Drop retries and long tool output. Write in the third person.`;
@@ -19,11 +19,12 @@ export function extractHandoff(output) {
   return block;
 }
 
-/** Attach, env, open and toast for a thread that already exists. */
-async function settleSpawnedThread(ticket, thread, persona, { announce = true } = {}) {
+/** Attach, env, open, paste and toast for a thread that already exists. */
+async function settleSpawnedThread(ticket, thread, options = {}) {
+  const persona = options.persona ?? null;
   const links = await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [ticket.id]);
   if (!links.some((row) => String(row.thread_id) === thread.id)) {
-    await store.attachInner(ticket.id, thread.id, persona ?? null);
+    await store.attachInner(ticket.id, thread.id, persona);
   }
   const fresh = await threads.get(thread.id);
   if (fresh.environmentId) {
@@ -33,12 +34,18 @@ async function settleSpawnedThread(ticket, thread, persona, { announce = true } 
     }
   }
   await openThread(thread.id);
-  if (announce) await toast(`Started #${ticket.number}. In the new thread run: kg kanban ticket show ${ticket.id}`);
+  const personaText = options.personaText !== undefined ? options.personaText : await personaBody(persona);
+  const input = threadStartupInput({ personaText, prompt: options.prompt ?? "", ticketId: ticket.id });
+  // threads.send (feat/hook-send, in review) will replace pasteIntoThread once it lands.
+  await pasteIntoThread(thread.id, input);
+  if (options.announce !== false) {
+    await toast(`Started #${ticket.number}. Press Enter in the new thread to send the pasted prompt.`);
+  }
 }
 
 /** @param {any} ticket @param {{persona?: string | null, prompt?: string, onSpawned?: (thread: any) => Promise<void> | void}} [options] */
 export async function spawnForTicket(ticket, options = {}) {
-  await personaBody(options.persona);
+  const personaText = await personaBody(options.persona);
   const program = String(settings().defaultProgram || "claude");
   const project = await threads.project(ticket.projectId);
   /** @type {import("kagan/threads").EnvironmentSpec} */
@@ -59,7 +66,7 @@ export async function spawnForTicket(ticket, options = {}) {
       ? { kind: "worktree", branch: `kanban/${ticket.number}` }
       : { kind: "project-default" };
   }
-  const title = (options.prompt || "").trim() || `#${ticket.number} ${ticket.title}`;
+  const title = `#${ticket.number} ${ticket.title}`;
   const thread = await threads.spawn({
     projectId: ticket.projectId,
     program,
@@ -73,7 +80,12 @@ export async function spawnForTicket(ticket, options = {}) {
     },
   });
   if (options.onSpawned) await options.onSpawned(thread);
-  await settleSpawnedThread(ticket, thread, options.persona);
+  await settleSpawnedThread(ticket, thread, {
+    persona: options.persona ?? null,
+    prompt: options.prompt ?? "",
+    personaText,
+    announce: true,
+  });
   return thread;
 }
 
@@ -85,15 +97,17 @@ export function startThread(id, options = {}) {
   });
 }
 
-export function startHandoff(id, options) {
+export function startHandoff(id, options = {}) {
   return store.serial(async () => {
-    let nextThreadId = options.nextThreadId ?? null;
+    const saved = await store.readHandoff(id);
+    const merged = resolveHandoffOptions(options, saved);
+    let nextThreadId = merged.nextThreadId;
     try {
-      const next = await runHandoff(id, options, (spawned) => { nextThreadId = spawned; });
-      await store.deleteHandoff(id);
+      const next = await runHandoff(id, merged, (spawned) => { nextThreadId = spawned; });
+      await store.markHandoffAwaitingArchive(id, { ...merged, nextThreadId: next.id });
       return next;
     } catch (error) {
-      await store.writeHandoffFailure(id, { ...options, nextThreadId }, error);
+      await store.writeHandoffFailure(id, { ...merged, nextThreadId }, error);
       throw error;
     }
   });
@@ -154,15 +168,15 @@ async function runHandoff(id, options, onSpawned) {
       });
     } else if (step === "finish-successor") {
       next = await threads.get(plan.nextThreadId);
-      await settleSpawnedThread(ticket, next, persona, { announce: false });
-    } else if (step === "archive") {
-      for (const threadId of plan.archive) await threads.archive(threadId);
+      await settleSpawnedThread(ticket, next, { persona, prompt, announce: false });
     }
   }
   store.touch();
   if (!next && plan.action === "resume") next = await threads.get(plan.nextThreadId);
   await toast(
-    plan.action === "resume" ? `Handoff on #${ticket.number} finished` : `Handoff on #${ticket.number} started a new thread`,
+    plan.action === "resume"
+      ? `Handoff on #${ticket.number} finished. Archive sources when the new thread has what it needs.`
+      : `Handoff on #${ticket.number} started a new thread. Press Enter there, then Archive sources when ready.`,
     { label: "Open board", command: "open-board" },
   );
   return next;
@@ -177,6 +191,21 @@ export async function retryHandoff(id) {
     prompt: job.prompt,
     consolidate: job.consolidate,
     nextThreadId: job.nextThreadId,
+  });
+}
+
+export function archiveSources(id) {
+  return store.serial(async () => {
+    const job = await store.readHandoff(id);
+    if (!job || job.status !== "awaiting-archive") throw new Error("No sources waiting to archive");
+    for (const threadId of job.sources) {
+      const thread = await threads.get(threadId).catch(() => null);
+      if (!thread || thread.archivedAt !== null) continue;
+      await threads.archive(threadId);
+    }
+    await store.deleteHandoff(id);
+    store.touch();
+    await toast("Archived the handoff sources");
   });
 }
 

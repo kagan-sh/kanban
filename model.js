@@ -25,7 +25,8 @@ export function attention(thread) {
 export function needsYou(ticket) {
   const handoff = ticket.handoff;
   const failed = Boolean(handoff && (handoff.status === "failed" || handoff.error));
-  return Boolean(ticket.proposed || ticket.pendingStage || failed || ticket.threads.some(attention));
+  const archive = handoff?.status === "awaiting-archive";
+  return Boolean(ticket.proposed || ticket.pendingStage || failed || archive || ticket.threads.some(attention));
 }
 
 export function target(threads) {
@@ -120,7 +121,9 @@ export function planMove(ticket, stage, resolution = "done") {
 }
 
 /**
- * A handoff that already spawned its successor only archives sources that are still live.
+ * A handoff that already spawned its successor finishes settle without spawning again.
+ * Sources stay live until the person archives them; collecting each source's handoff
+ * needs host threads.send and threads.output, which are not on main yet.
  * @param {{ sources?: string[], nextThreadId?: string | null, threads: Record<string, { onTicket?: boolean, archived?: boolean }> }} input
  */
 export function planHandoff(input) {
@@ -140,17 +143,40 @@ export function planHandoff(input) {
 }
 
 /**
- * Spawn saves the successor id before attach, env, open or toast.
- * Resume finishes that work, then archives sources that are still live.
+ * Spawn saves the successor id before attach, env, open, paste or toast.
+ * Sources are not archived here; Archive sources is a separate step.
  */
 export function handoffSteps(plan) {
-  if (plan.action === "resume") return ["finish-successor", "archive"];
-  if (plan.action === "spawn") return ["comment", "spawn", "archive"];
+  if (plan.action === "resume") return ["finish-successor"];
+  if (plan.action === "spawn") return ["comment", "spawn"];
   return [];
 }
 
 /** Work that must not run before the successor id is saved. */
-export const SETTLE_AFTER_SPAWN = ["attach", "env", "open", "toast"];
+export const SETTLE_AFTER_SPAWN = ["attach", "env", "open", "paste", "toast"];
+
+/** Merge a resubmitted form with a saved job so a second submit does not spawn again. */
+export function resolveHandoffOptions(options = {}, saved = null) {
+  const sources = options.sourceThreadIds?.length
+    ? options.sourceThreadIds
+    : (saved?.sources ?? []);
+  return {
+    persona: options.persona !== undefined ? options.persona : (saved?.persona ?? null),
+    prompt: options.prompt !== undefined ? options.prompt : (saved?.prompt ?? ""),
+    consolidate: options.consolidate ?? saved?.consolidate ?? false,
+    sourceThreadIds: [...new Set(sources)],
+    nextThreadId: options.nextThreadId ?? saved?.nextThreadId ?? null,
+  };
+}
+
+/** Text pasted into a new thread. The person still presses Enter to send it. */
+export function threadStartupInput({ personaText = null, prompt = "", ticketId }) {
+  const parts = [];
+  if (personaText && String(personaText).trim()) parts.push(String(personaText).trim());
+  if (prompt && String(prompt).trim()) parts.push(String(prompt).trim());
+  parts.push(`Run kg kanban ticket show ${ticketId} first; read its description and comments.`);
+  return parts.join("\n\n");
+}
 
 /** Controls for a proposed stage move on a card or ticket page. */
 export function pendingMoveControls(ticket, prefix) {
