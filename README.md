@@ -2,7 +2,7 @@
 
 A native ticket board for [kagan](https://kagan.sh). One plain-JavaScript plugin owns the board, ticket detail, replaceable sidebar list, CLI and SQLite data. No build step.
 
-Ported from the bb-kit Kanban plugin: tickets move through **Backlog → In progress → Review → Done**, hold one or more threads, and stay separate from thread runtime status. Threads on no ticket are **loose**. Script drag-and-drop is not in the plugin API yet, so moves and attachment use menus and buttons.
+Tickets move through **Backlog → In progress → Review → Done**, hold one or more threads, and stay separate from thread runtime status. Threads on no ticket are **loose**. Drag a card between columns to move it, or onto the top or bottom of a Backlog card to rank it, or onto the middle of a card to make it a sub-ticket. Drag a thread onto a card to attach it, onto a column to make a ticket, or onto Loose to take it off. A refused move says why. Menus and the N key still work.
 
 ## Install
 
