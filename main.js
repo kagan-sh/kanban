@@ -2,22 +2,35 @@
 import { View } from "gpui-kit";
 import { next, reply, fail } from "kagan/jobs";
 import { context, openPanel, log } from "kagan/host";
+import * as threads from "kagan/threads";
 import { cli } from "./cli.js";
 import * as store from "./store.js";
+import * as handoff from "./handoff.js";
 export { BoardPanel, SidebarList } from "./views.js";
+
+/** A thread a ticket's thread started joins that ticket, unless it is already on another. */
+export async function joinParentTicket(threadId) {
+  // The attach is a read-check-write, so it belongs inside the write queue.
+  return store.serial(async () => {
+    const thread = await threads.get(threadId).catch(() => null);
+    if (!thread?.parentThreadId) return;
+    const own = await store.ticketOfThread(threadId);
+    if (own) return;
+    const parent = await store.ticketOfThread(thread.parentThreadId);
+    if (!parent || parent.stage === "done" || parent.proposed) return;
+    await store.attachInner(parent.id, threadId);
+  });
+}
 
 export default class Plugin extends View {
   init(_props, cx) {
     this.jobs = cx.spawn(async () => {
       try {
         await store.ready();
+        await handoff.expireHandoffs(true);
       } catch (error) {
-        const message = `Kanban database: ${error}`;
-        log("error", message);
-        for (;;) {
-          const job = await next();
-          try { fail(job.id, message); } catch { /* already settled */ }
-        }
+        // ready() is retryable; each job will surface the real error until the cause clears.
+        log("error", `Kanban database: ${error}`);
       }
       for (;;) {
         const job = await next();
@@ -26,6 +39,9 @@ export default class Plugin extends View {
           cx.spawn(async () => {
             try {
               if (job.type === "thread.deleted") await store.detach(job.threadId);
+              if (job.type === "thread.waiting") { await handoff.collectHandoff(job.threadId); await handoff.expireHandoffs(); }
+              if (job.type === "thread.idle") await handoff.expireHandoffs();
+              if (job.type === "thread.created") await joinParentTicket(job.threadId);
               store.touch();
             } catch (error) {
               log("error", String(error));
@@ -56,7 +72,7 @@ export default class Plugin extends View {
               throw new Error(`Unknown job ${job.kind}`);
             } catch (error) {
               log("error", String(error));
-              try { fail(job.id, String(error)); } catch { /* already replied */ }
+              try { fail(job.id, String(error)); } catch (replyError) { log("debug", `Job ${job.id} was already replied to: ${replyError}`); }
             }
           });
         }

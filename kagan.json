@@ -5,7 +5,7 @@
   "kagan": ">=0.1.0",
   "entry": "main.js",
   "icon": "icons/board.svg",
-    "instructions": "Kanban is a ticket board over kagan threads. Read your ticket with kg kanban ticket show before working. Never create tickets unprompted. New tickets are stories; pass --kind bug or task. A story needs a ## Acceptance criteria checklist, and a bug needs Steps to reproduce, Expected, and Actual, before it leaves Backlog. Move with kg kanban move <stage>; Done archives threads and requires the setting that allows it. When moves apply immediately, kg kanban move done --wont-do ends the ticket without those checks. When moves wait for approval, that command is refused: a proposal cannot carry won't do, so run kg kanban move done and tell the person to pick Won't do. Rank Backlog with kg kanban ticket rank. Write a ## Handoff as a ticket comment when handing work to a new thread.",
+    "instructions": "Kanban is a ticket board over kagan threads. Read your ticket with kg kanban ticket show before working, and again when you need the latest. Never create tickets unprompted. New tickets are stories; pass --kind bug or task. A story needs a ## Acceptance criteria checklist, and a bug needs Steps to reproduce, Expected, and Actual, before it leaves Backlog. Move with kg kanban move <stage>; Done archives threads and requires the setting that allows it. When moves apply immediately, kg kanban move done --wont-do ends the ticket without those checks. When moves wait for approval, that command is refused: a proposal cannot carry won't do, so run kg kanban move done and tell the person to pick Won't do. Rank Backlog with kg kanban ticket rank; its order is the priority. Blockers and sub-tickets are other tickets in the same project: kg kanban ticket block and ticket parent. Write a ## Handoff with ### Goal and ### Verified as a ticket comment when handing work to a new thread.",
   "powers": {
     "run": [{ "program": "gh" }, { "program": "git" }],
     "areas": ["threads", "database", "process"]
@@ -43,6 +43,6 @@
       { "name": "repos", "usage": "repos <list|link|unlink|issues|import> [repo] [number] [--project <id>] [--query <text>] [--label <label>] [--assignee <login>] [--author <login>] [--json]" }
     ]
   }],
-  "events": ["thread.created", "thread.started", "thread.idle", "thread.failed", "thread.archived", "thread.unarchived", "thread.deleted"],
+  "events": ["thread.created", "thread.started", "thread.waiting", "thread.idle", "thread.failed", "thread.archived", "thread.unarchived", "thread.deleted"],
   "skills": ["skills/kanban"]
 }

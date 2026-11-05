@@ -1,5 +1,7 @@
 // @ts-check
 
+import { acceptanceCriteria, isGated, startProblem } from "./rules.js";
+
 export const STAGES = ["backlog", "in-progress", "review", "done"];
 export const TITLES = { backlog: "Backlog", "in-progress": "In progress", review: "Review", done: "Done" };
 export const PERSONAS = { backlog: "intake", "in-progress": "implementer", review: "reviewer-default", done: "ship" };
@@ -33,77 +35,47 @@ export function target(threads) {
   return [...threads].sort((a, b) => Number(Boolean(attention(b))) - Number(Boolean(attention(a))) || b.updatedAt - a.updatedAt)[0] ?? null;
 }
 
-export function matches(ticket, search) {
+export function ticketMatches(ticket, search) {
   const words = `#${ticket.number} ${ticket.title} ${ticket.threads.map(t => t.title).join(" ")}`.toLowerCase();
   return words.includes(search.trim().toLowerCase());
 }
 
-export const KINDS = ["story", "bug", "task"];
-export const AGE_WARN_DAYS = 14;
-const DAY_MS = 24 * 60 * 60_000;
-export const BUG_TEMPLATE = "## Steps to reproduce\n\n1. \n\n## Expected\n\n\n## Actual\n\n\n## Environment\n\n";
-const BUG_SECTIONS = ["Steps to reproduce", "Expected", "Actual"];
 const WORKING = new Set(["starting", "active", "stopping"]);
 
-/** @param {string} value @param {boolean} [allowNone] */
-export function parseKind(value, allowNone = false) {
-  if (allowNone && value === "none") return null;
-  if (!KINDS.includes(value)) throw new Error("Kind must be story, bug, or task");
-  return value;
+/** A Done ticket's threads are archived; these are the ones leaving Done brings back. */
+export function handoffSources(ticket) {
+  return ticket.stage === "done" ? (ticket.archivedByDone ?? []) : (ticket.threads ?? []);
 }
 
-/** @param {string} description @param {string} name */
-export function section(description, name) {
-  const lines = String(description ?? "").split(/\r?\n/);
-  const wanted = name.toLocaleLowerCase();
-  for (let index = 0; index < lines.length; index++) {
-    const heading = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(lines[index]);
-    if (!heading || heading[2].toLocaleLowerCase() !== wanted) continue;
-    const level = heading[1].length;
-    const body = [];
-    for (const line of lines.slice(index + 1)) {
-      const next = /^(#{1,6})\s/.exec(line);
-      if (next && next[1].length <= level) break;
-      body.push(line);
-    }
-    return body.join("\n");
-  }
+/** The facts a proposed move must still match when it is accepted. */
+export function moveScope(ticket) {
+  const links = (ticket.links ?? ticket.threads ?? []).map(link => link.threadId ?? link.id).sort();
+  const blockers = (ticket.blockedBy ?? []).map(blocker => [blocker.id, blocker.stage]).sort();
+  return JSON.stringify({
+    stage: ticket.stage,
+    title: ticket.title,
+    description: ticket.description,
+    parent: ticket.parentId ?? null,
+    threads: links,
+    blockers,
+  });
+}
+
+/** Null while the proposal still matches the ticket; otherwise why acceptance must be refused. */
+export function pendingScopeProblem(ticket) {
+  if (!ticket.pendingStage) return null;
+  if (!ticket.pendingScope) return "This move was proposed before the ticket could be checked. Dismiss it and request a fresh confirmation.";
+  if (ticket.pendingScope !== moveScope(ticket)) return "This ticket changed after the move was proposed. Dismiss it and request a fresh confirmation.";
   return null;
 }
 
-/** @param {string} description */
-export function acceptanceCriteria(description) {
-  const body = section(description, "Acceptance criteria");
-  if (body === null) return null;
-  let done = 0;
-  let total = 0;
-  for (const line of body.split("\n")) {
-    const item = /^\s*[-*+]\s+\[([ xX])\]\s+\S/.exec(line);
-    if (!item) continue;
-    total += 1;
-    if (item[1] !== " ") done += 1;
-  }
-  return { done, total };
-}
-
-/** @param {{kind: string | null, description: string}} ticket */
-export function startProblem(ticket) {
-  if (ticket.kind === "story") {
-    const criteria = acceptanceCriteria(ticket.description);
-    if (!criteria) return "no \"## Acceptance criteria\" list";
-    if (criteria.total === 0) return "its \"## Acceptance criteria\" section has no \"- [ ]\" items";
-    return null;
-  }
-  if (ticket.kind === "bug") {
-    const missing = BUG_SECTIONS.filter(name => !section(ticket.description, name)?.replace(/^\s*\d+\.\s*$/gm, "").trim());
-    return missing.length ? `a bug needs "## ${missing.join("\", \"## ")}" filled in` : null;
-  }
-  return null;
-}
-
-/** @param {string} from @param {string} to @param {string} [resolution] */
-export function isGated(from, to, resolution = "done") {
-  return from === "backlog" && to !== "backlog" && !(to === "done" && resolution === "wont-do");
+/** Where a ticket sits in its project's Backlog, or null outside Backlog. */
+export function backlogRank(tickets, id) {
+  const ticket = tickets.find(item => item.id === id);
+  if (!ticket || ticket.stage !== "backlog") return null;
+  const list = tickets.filter(item => item.projectId === ticket.projectId && item.stage === "backlog").sort(backlogOrder);
+  const position = list.findIndex(item => item.id === id) + 1;
+  return position ? { position, of: list.length } : null;
 }
 
 /** Gate only; WIP and blocker warnings come from the move. */
@@ -114,7 +86,7 @@ export function planMove(ticket, stage, resolution = "done") {
   if (ticket.stage === stage && (stage !== "done" || (ticket.resolution ?? "done") === resolution)) return { action: "ignore" };
   const problem = isGated(ticket.stage, stage, resolution) ? startProblem(ticket) : null;
   if (problem) return { action: "refuse", reason: `Can't start #${ticket.number}: ${problem}.` };
-  const live = (ticket.threads ?? []).length > 0;
+  const live = handoffSources(ticket).length > 0;
   if (stage === "done" && ticket.stage !== "done" && live) return { action: "confirm-done", stage, resolution };
   if (resolution !== "wont-do" && (stage === "in-progress" || stage === "review") && live) return { action: "handoff", stage, resolution };
   return { action: "move", stage, resolution };
@@ -144,30 +116,11 @@ export function planHandoff(input) {
   return { action: "spawn", archive: ids };
 }
 
-/**
- * Spawn saves the successor id before attach, env, open, paste or toast.
- * Sources are not archived here; Archive sources is a separate step.
- */
-export function handoffSteps(plan) {
-  if (plan.action === "resume") return ["finish-successor"];
-  if (plan.action === "spawn") return ["comment", "spawn"];
-  return [];
-}
-
-/** Work that must not run before the successor id is saved. */
-export const SETTLE_AFTER_SPAWN = ["attach", "env", "open", "paste", "toast"];
-
-/** Settle steps recorded after each succeeds, so Retry skips finished work. */
-export const SETTLE_STEPS = ["attached", "env", "opened", "pasted", "toasted"];
-
-export function remainingSettleSteps(done = {}) {
-  return SETTLE_STEPS.filter(step => !done[step]);
-}
-
 export function withSettleStep(done, step) {
   return { ...done, [step]: true };
 }
 
+/** @param {any} [options] @param {any} [saved] */
 export function resolveHandoffOptions(options = {}, saved = null) {
   if (saved?.status === "awaiting-archive") {
     return { action: "refuse", reason: "Archive the previous handoff sources first" };
@@ -221,10 +174,10 @@ export function threadStartupInput({ personaText = null, prompt = "", ticketId }
 export function pendingMoveControls(ticket, prefix) {
   if (!ticket.pendingStage) return null;
   const actions = [
-    { id: `${prefix}:accept-move`, label: "Accept" },
-    { id: `${prefix}:dismiss-move`, label: "Dismiss" },
+    { id: `${prefix}:accept-move`, kind: "accept", label: "Accept" },
+    { id: `${prefix}:dismiss-move`, kind: "dismiss", label: "Dismiss" },
   ];
-  if (ticket.pendingStage === "done") actions.push({ id: `${prefix}:wont`, label: "Won't do" });
+  if (ticket.pendingStage === "done") actions.push({ id: `${prefix}:wont`, kind: "wont-do", label: "Won't do" });
   return { prompt: `Move to ${TITLES[ticket.pendingStage]}?`, actions };
 }
 
@@ -234,22 +187,11 @@ export function moveWarning(moved) {
 
 /** A handoff left as running when the process died becomes a failed job Retry can finish. */
 export function failInterruptedHandoff(row) {
-  if (String(row.status) !== "running") return row;
+  if (!["running", "handing-off"].includes(String(row.status))) return row;
   const error = row.error == null || String(row.error).trim() === ""
     ? "Interrupted before the handoff finished"
     : String(row.error);
   return { ...row, status: "failed", error };
-}
-
-/** @param {string} title */
-export function looksLikeUserStory(title) {
-  return /^\s*as an?\s/i.test(String(title ?? ""));
-}
-export const USER_STORY_WARNING = "Titles that start with \"As a\" read as a user story. Keep the title short and put the story in the description.";
-
-/** @param {number | null} stageAt @param {number} [now] */
-export function daysInStage(stageAt, now = Date.now()) {
-  return stageAt === null || stageAt === undefined ? null : Math.max(0, Math.floor((now - stageAt) / DAY_MS));
 }
 
 /** @param {{proposed: boolean, rank: number | null, number: number}} a @param {{proposed: boolean, rank: number | null, number: number}} b @param {(a: any, b: any) => number} [tie] */
@@ -295,12 +237,21 @@ export function openBlockers(ticket) {
   return (ticket.blockedBy ?? []).filter(ref => ref.stage !== "done");
 }
 
+/** Why one ticket cannot link to another as its parent or blocker, or null when it can. */
+export function linkProblem(ticket, other, verb = "nest") {
+  if (ticket.id === other.id) return verb === "block" ? "A ticket can't block itself." : "A ticket can't be its own sub-ticket.";
+  if (ticket.projectId !== other.projectId) return `#${other.number} is in another project.`;
+  if (other.proposed) return `Accept #${other.number} before linking to it`;
+  if (ticket.proposed) return `Accept #${ticket.number} before linking it`;
+  return null;
+}
+
 /** @param {readonly any[]} tickets @param {string} ticketId @param {string} blockerId */
 export function canBlock(tickets, ticketId, blockerId) {
   const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
   const ticket = byId.get(ticketId);
   const blocker = byId.get(blockerId);
-  if (!ticket || !blocker || ticket.id === blocker.id || ticket.projectId !== blocker.projectId || ticket.proposed || blocker.proposed) return false;
+  if (!ticket || !blocker || linkProblem(ticket, blocker, "block") !== null) return false;
   const seen = new Set();
   const waiting = [blocker.id];
   for (let id = waiting.pop(); id !== undefined; id = waiting.pop()) {
@@ -375,7 +326,7 @@ export function canNest(tickets, childId, parentId) {
   const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
   const child = byId.get(childId);
   const parent = byId.get(parentId);
-  if (!child || !parent || child.projectId !== parent.projectId || child.proposed || parent.proposed) return false;
+  if (!child || !parent || linkProblem(child, parent) !== null) return false;
   for (let at = parent; at; at = at.parentId ? byId.get(at.parentId) : undefined) {
     if (at.id === child.id) return false;
   }
@@ -471,8 +422,9 @@ export function sidebarRows(projects, tickets, live, activeProject, expanded, co
   for (const project of projects) {
     const items = tickets.filter(t => t.projectId === project.id && t.stage !== "done").map(t => {
       const threads = t.links.map(l => byId.get(l.threadId)).filter(Boolean);
-      return { id: t.id, ticket: { ...t, threads }, threads, thread: target(threads), depth: 0, place: place[t.stage], needs: needsYou({ ...t, threads }), pinned: threads.some(t => t.pinned), updatedAt: Math.max(t.updatedAt, ...threads.map(t => t.updatedAt)) };
-    });
+      return { kind: "ticket", id: t.id, ticket: { ...t, threads }, threads, thread: target(threads), depth: 0, place: place[t.stage], needs: needsYou({ ...t, threads }), pinned: threads.some(t => t.pinned), updatedAt: Math.max(t.updatedAt, ...threads.map(t => t.updatedAt)) };
+      // A Backlog ticket waits there until a thread works on it, so the list only shows it once one does.
+    }).filter(row => row.ticket.stage !== "backlog" || row.threads.length > 0);
     const listed = new Map(items.map(r => [r.id, r]));
     const children = new Map();
     for (const item of items) {
@@ -489,9 +441,9 @@ export function sidebarRows(projects, tickets, live, activeProject, expanded, co
     };
     const roots = items.filter(r => !listed.has(r.ticket.parentId));
     roots.forEach(family);
-    const loose = [...byId.values()].filter(t => t.projectId === project.id && !linked.has(t.id)).map(t => ({ id: t.id, thread: t, ticket: null, needs: Boolean(attention(t)), pinned: t.pinned, updatedAt: t.updatedAt, place: place.thread, depth: 0 }));
+    const loose = [...byId.values()].filter(t => t.projectId === project.id && !linked.has(t.id)).map(t => ({ kind: "thread", id: t.id, thread: t, ticket: null, needs: Boolean(attention(t)), pinned: t.pinned, updatedAt: t.updatedAt, place: place.thread, depth: 0 }));
     if (!items.length && !loose.length && project.id !== activeProject) continue;
-    rows.push({ id: project.id, project, needs: [...items, ...loose].filter(r => r.needs).length });
+    rows.push({ kind: "project", id: project.id, project, needs: [...items, ...loose].filter(r => r.needs).length });
     if (collapsed.has(project.id)) continue;
     const ordered = list => {
       const rank = r => r.needs ? 0 : r.pinned ? 1 : 2 + r.place;
@@ -503,7 +455,7 @@ export function sidebarRows(projects, tickets, live, activeProject, expanded, co
     const emit = (item, depth) => {
       rows.push({ ...item, depth });
       if (!item.ticket) return;
-      if (expanded.has(item.id)) for (const thread of item.threads) rows.push({ id: `child:${thread.id}`, ticket: item.ticket, thread, depth: depth + 1, needs: Boolean(attention(thread)) });
+      if (expanded.has(item.id)) for (const thread of item.threads) rows.push({ kind: "ticket-thread", id: `child:${thread.id}`, ticket: item.ticket, thread, depth: depth + 1, needs: Boolean(attention(thread)) });
       for (const child of ordered(children.get(item.id) ?? [])) emit(child, depth + 1);
     };
     for (const item of ordered([...roots, ...loose])) emit(item, 0);

@@ -3,9 +3,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canNest, commentWhen, descriptionPreview, dropOnCard, dropOnColumn, dropOnLoose, failInterruptedHandoff,
-  handoffSteps, moveWarning, needsYou, pendingMoveControls, planHandoff, planMove, remainingSettleSteps,
-  resolveHandoffOptions, SETTLE_AFTER_SPAWN, SETTLE_STEPS, threadStartupInput, withSettleStep,
+  moveWarning, needsYou, pendingMoveControls, planHandoff, planMove,
+  resolveHandoffOptions, threadStartupInput,
+  moveScope, pendingScopeProblem, backlogRank, linkProblem, canBlock, sidebarRows,
 } from "./model.js";
+import { BUILTIN_PERSONAS } from "./personas-data.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
 
@@ -95,14 +97,17 @@ test("a move with live threads confirms Done and offers a handoff before it arch
   assert.equal(planMove(working, "in-progress").action, "ignore");
 });
 
+test("a ticket leaving Done offers a handoff from the threads its Done move archived", () => {
+  const done = { ...elsewhere, stage: "done", threads: [], archivedByDone: [{ id: "thr_a" }] };
+  assert.equal(planMove(done, "in-progress").action, "handoff");
+  assert.equal(planMove(done, "review").action, "handoff");
+  assert.equal(planMove({ ...done, archivedByDone: [] }, "in-progress").action, "move");
+});
+
 test("a handoff retry finishes cleanup and does not spawn again", () => {
   const live = { thr_a: { onTicket: true, archived: false }, thr_b: { onTicket: true, archived: false } };
   const spawned = planHandoff({ sources: ["thr_a", "thr_b"], threads: live });
-  assert.deepEqual(handoffSteps(spawned), ["comment", "spawn"]);
   assert.deepEqual(spawned.archive, ["thr_a", "thr_b"]);
-  assert.ok(SETTLE_AFTER_SPAWN.includes("attach"));
-  assert.ok(SETTLE_AFTER_SPAWN.includes("paste"));
-  assert.ok(SETTLE_AFTER_SPAWN.includes("toast"));
   assert.equal(planHandoff({ sources: ["thr_a"], threads: { thr_a: { onTicket: true, archived: true } } }).action, "refuse");
   const resume = planHandoff({
     sources: ["thr_a", "thr_b"],
@@ -112,7 +117,6 @@ test("a handoff retry finishes cleanup and does not spawn again", () => {
   assert.equal(resume.action, "resume");
   assert.equal(resume.nextThreadId, "thr_next");
   assert.deepEqual(resume.archive, ["thr_b"]);
-  assert.deepEqual(handoffSteps(resume), ["finish-successor"]);
 });
 
 test("resubmitting a failed handoff resumes the saved successor instead of spawning again", () => {
@@ -132,7 +136,6 @@ test("resubmitting a failed handoff resumes the saved successor instead of spawn
     nextThreadId: merged.nextThreadId,
     threads: { thr_a: { onTicket: true, archived: false } },
   }).action, "resume");
-  assert.deepEqual(handoffSteps({ action: "resume", nextThreadId: "thr_next", archive: ["thr_a"] }), ["finish-successor"]);
 });
 
 test("a new handoff while archival awaits keeps the saved sources and refuses a successor as a source", () => {
@@ -156,20 +159,9 @@ test("a new handoff while archival awaits keeps the saved sources and refuses a 
   }).action, "refuse");
 });
 
-test("retry skips paste after a later toast failure", () => {
-  const afterPaste = withSettleStep(withSettleStep({}, "attached"), "pasted");
-  assert.deepEqual(remainingSettleSteps(afterPaste), ["env", "opened", "toasted"]);
-  assert.ok(!remainingSettleSteps(afterPaste).includes("pasted"));
-  assert.deepEqual(
-    remainingSettleSteps(withSettleStep(withSettleStep(withSettleStep(withSettleStep(withSettleStep({}, "attached"), "env"), "opened"), "pasted"), "toasted")),
-    [],
-  );
-});
-
-test("a finished handoff leaves sources live until Archive sources", () => {
+test("a handoff asks its sources, then archives them once the successor starts", () => {
   assert.equal(needsYou({ ...elsewhere, handoff: { status: "awaiting-archive", error: null } }), true);
-  assert.ok(!handoffSteps({ action: "spawn", archive: ["thr_a"] }).includes("archive"));
-  assert.ok(!handoffSteps({ action: "resume", nextThreadId: "thr_next", archive: ["thr_a"] }).includes("archive"));
+  assert.equal(planHandoff({ sources: ["thr_a"], threads: { thr_a: { onTicket: true } } }).action, "spawn");
 });
 
 test("the prompt and persona are pasted as thread input, not only the title", () => {
@@ -193,17 +185,12 @@ test("a proposed move still has Accept, Dismiss and Won't do after the board set
   assert.deepEqual(pendingMoveControls(proposed, "card:tkt_3"), {
     prompt: "Move to Review?",
     actions: [
-      { id: "card:tkt_3:accept-move", label: "Accept" },
-      { id: "card:tkt_3:dismiss-move", label: "Dismiss" },
+      { id: "card:tkt_3:accept-move", kind: "accept", label: "Accept" },
+      { id: "card:tkt_3:dismiss-move", kind: "dismiss", label: "Dismiss" },
     ],
   });
   assert.deepEqual(pendingMoveControls(done, "detail").actions.map(a => a.label), ["Accept", "Dismiss", "Won't do"]);
   assert.equal(pendingMoveControls(elsewhere, "card:tkt_3"), null);
-  const { readFileSync } = await import("node:fs");
-  const views = readFileSync(new URL("./views.js", import.meta.url), "utf8");
-  assert.match(views, /renderPendingMove\(/);
-  assert.match(views, /this\.pendingMove = null/);
-  assert.equal(/^\s*pendingMove\(/m.test(views), false);
 });
 
 test("an interrupted running handoff becomes a failed job Retry can finish", () => {
@@ -212,6 +199,7 @@ test("an interrupted running handoff becomes a failed job Retry can finish", () 
   assert.equal(failed.status, "failed");
   assert.equal(failed.error, "Interrupted before the handoff finished");
   assert.equal(failed.next_thread_id, "thr_next");
+  assert.equal(failInterruptedHandoff({ ...running, status: "handing-off" }).status, "failed");
   assert.equal(failInterruptedHandoff({ ...running, error: "toast failed" }).error, "toast failed");
   assert.equal(failInterruptedHandoff({ ...running, status: "failed" }).status, "failed");
 });
@@ -230,12 +218,53 @@ test("a proposed card shows a short description, and comments show when they wer
   assert.equal(commentWhen(null), "");
 });
 
-test("a Done move clears handoff settle progress so reopen then handoff starts fresh", async () => {
-  const { readFileSync } = await import("node:fs");
-  const storeSrc = readFileSync(new URL("./store.js", import.meta.url), "utf8");
-  assert.match(storeSrc, /wanted === "done"[\s\S]*?await deleteHandoff\(id\)/);
-  assert.equal(/wanted === "done" && t\.stage !== "done"[\s\S]*?DELETE FROM handoff WHERE ticket_id/.test(storeSrc), false);
-  const stale = SETTLE_STEPS.reduce((done, step) => withSettleStep(done, step), {});
-  assert.deepEqual(remainingSettleSteps(stale), []);
-  assert.deepEqual(remainingSettleSteps({}), [...SETTLE_STEPS]);
+test("a proposed move is refused once the ticket has changed since it was proposed", () => {
+  const t = { ...elsewhere, pendingStage: "review", links: [{ threadId: "thr_a" }], blockedBy: [] };
+  const scope = moveScope(t);
+  assert.equal(pendingScopeProblem({ ...t, pendingScope: scope }), null);
+  assert.match(pendingScopeProblem({ ...t, pendingScope: null }), /before the ticket could be checked/);
+  assert.match(pendingScopeProblem({ ...t, pendingScope: scope, title: "Renamed" }), /changed after the move was proposed/);
+  assert.match(pendingScopeProblem({ ...t, pendingScope: scope, links: [{ threadId: "thr_a" }, { threadId: "thr_b" }] }), /changed/);
+  assert.match(pendingScopeProblem({ ...t, pendingScope: scope, blockedBy: [{ id: "tkt_2", stage: "backlog" }] }), /changed/);
+  assert.notEqual(moveScope({ ...t, links: [{ threadId: "thr_b" }, { threadId: "thr_a" }] }), null);
+  assert.equal(moveScope({ ...t, links: [{ threadId: "thr_b" }, { threadId: "thr_a" }] }), moveScope({ ...t, links: [{ threadId: "thr_a" }, { threadId: "thr_b" }] }));
+});
+
+test("a ticket knows its place in Backlog and loses it in another column", () => {
+  const other = ticket("tkt_6", 6, "backlog", { rank: 1 });
+  const third = ticket("tkt_7", 7, "backlog", { rank: 3 });
+  const ranked = { ...part, rank: 2 };
+  assert.deepEqual(backlogRank([other, ranked, third], ranked.id), { position: 2, of: 3 });
+  assert.equal(backlogRank([elsewhere], elsewhere.id), null);
+  assert.equal(backlogRank([other, third], "tkt_7").position, 2);
+});
+
+test("a link says why it is refused, and a cycle is not a link", () => {
+  const proposed = ticket("tkt_8", 8, "backlog", { proposed: true });
+  assert.equal(linkProblem(epic, part), null);
+  assert.equal(linkProblem(epic, epic), "A ticket can't be its own sub-ticket.");
+  assert.equal(linkProblem(epic, epic, "block"), "A ticket can't block itself.");
+  assert.match(linkProblem(epic, ticket("tkt_9", 9, "backlog", { projectId: "prj_2" })), /another project/);
+  assert.match(linkProblem(epic, proposed), /Accept #8 before linking to it/);
+  assert.match(linkProblem(proposed, epic), /Accept #8 before linking it/);
+  const cyclic = { ...epic, blockedBy: [{ id: "tkt_2", stage: "backlog" }] };
+  assert.equal(canBlock([cyclic, part], "tkt_2", "tkt_1"), false);
+  assert.equal(canBlock([epic, part], "tkt_2", "tkt_1"), true);
+  assert.equal(canNest([epic, part], "tkt_2", "tkt_1"), true);
+});
+
+test("the sidebar lists a Backlog ticket only once a live thread works on it", () => {
+  const projects = [{ id: "prj_1", name: "P" }];
+  const backlogWithThread = { ...epic, links: [{ threadId: "thr_a" }], threads: [] };
+  const quietBacklog = { ...part, links: [], threads: [] };
+  const ticking = { ...elsewhere, links: [{ threadId: "thr_a" }] };
+  const live = [{ id: "thr_a", projectId: "prj_1", title: "Work", status: "idle", updatedAt: 1, latestAttentionAt: 0, archivedAt: null }];
+  const rows = sidebarRows(projects, [backlogWithThread, quietBacklog, ticking], live, "prj_1", new Set(), new Set(), []);
+  const ids = rows.filter(r => r.ticket).map(r => r.id);
+  assert.deepEqual(ids.sort(), ["tkt_1", "tkt_3"]);
+});
+
+test("a built-in persona is available without a personas folder", () => {
+  assert.equal(typeof BUILTIN_PERSONAS["comment-editor"], "string");
+  assert.match(BUILTIN_PERSONAS["comment-editor"], /Constraint|constraint/);
 });
