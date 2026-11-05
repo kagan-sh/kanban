@@ -474,7 +474,7 @@ export class BoardPanel extends WatchedView {
             cx.stop_propagation();
             cx.notify();
           })
-          .child(new Input(this.composer).aria_label("New ticket title").track_focus(this.composerFocus)));
+          .child(new Input(this.composer).aria_label("New ticket title")));
       } else {
         body.child(button("new-ticket", "+  New ticket", cx => {
           this.composerOpen = true;

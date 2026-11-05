@@ -129,7 +129,8 @@ export function renderCard(view, t, cx, colors, radius) {
   view.dropTarget(view.dragSource(card, "ticket", t.id), t.id, (payload, side) => dropOnCard(payload, side, t, view.data.tickets, view.data.loose));
   if (active && view.over.side === "top") card.child(div().h(2).w_full().rounded(1).bg(colors.ring));
   const opener = new KgButton(`card:${t.id}`).label(t.title).ghost().compact().flex_1().min_w_0().on_click((a, b) => view.openTicket(t.id, clickCx(a, b)));
-  if (view.jumpId === t.id) opener.track_focus(view.jumpFocus);
+  // A button component has no focus binding; the card itself takes the keyboard for a jump.
+  if (view.jumpId === t.id) card.track_focus(view.jumpFocus);
   const meta = metaRow(view, t, cx, colors);
   card.child(h_flex().gap_2().items_start()
     .child(v_flex().gap_1().flex_1().min_w_0()
