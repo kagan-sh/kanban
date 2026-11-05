@@ -47,15 +47,15 @@ export function ready() {
     `ALTER TABLE ticket ADD COLUMN resolution TEXT NOT NULL DEFAULT 'done'`,
     `ALTER TABLE ticket ADD COLUMN stage_at INTEGER`,
     `ALTER TABLE ticket ADD COLUMN rank REAL`,
-    `ALTER TABLE ticket ADD COLUMN pending_scope TEXT`,
     `CREATE TABLE ticket_block (blocked_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, blocker_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, PRIMARY KEY (blocked_id, blocker_id))`,
     `CREATE INDEX ticket_block_blocker ON ticket_block (blocker_id)`,
     `CREATE TABLE board_rules (project_id TEXT PRIMARY KEY, age_warn_days INTEGER NOT NULL DEFAULT 14, wip_limit INTEGER)`,
+    `UPDATE ticket SET rank = (SELECT ordered.n FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY proposed DESC, (pending_stage IS NOT NULL) DESC, updated_at DESC, number) AS n FROM ticket WHERE stage = 'backlog') AS ordered WHERE ordered.id = ticket.id) WHERE stage = 'backlog' AND rank IS NULL`,
+    `ALTER TABLE ticket ADD COLUMN pending_scope TEXT`,
     // Append-only: every stage a ticket entered, so the ticket's own history survives a move.
     `CREATE TABLE stage_history (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE, stage TEXT NOT NULL, resolution TEXT NOT NULL, at INTEGER NOT NULL)`,
     `CREATE INDEX stage_history_ticket ON stage_history (ticket_id, at)`,
     `INSERT INTO stage_history (ticket_id, stage, resolution, at) SELECT id, stage, resolution, COALESCE(stage_at, created_at) FROM ticket WHERE id NOT IN (SELECT ticket_id FROM stage_history)`,
-    `UPDATE ticket SET rank = (SELECT ordered.n FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY proposed DESC, (pending_stage IS NOT NULL) DESC, updated_at DESC, number) AS n FROM ticket WHERE stage = 'backlog') AS ordered WHERE ordered.id = ticket.id) WHERE stage = 'backlog' AND rank IS NULL`,
   ];
   if (migrated) return migrated;
   migrated = migrate(statements).catch(error => {
