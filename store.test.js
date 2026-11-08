@@ -166,6 +166,52 @@ test("Done archives live threads and only the threads it archived come back", as
   assert.equal(threads.state.threads.get("thr_b").archivedAt, 1);
 });
 
+test("a failed thread read does not move a ticket or drop its thread", async () => {
+  const projectId = project();
+  const t = await store.createTicket({ projectId, title: "Locked", kind: "task" });
+  threads.addThread("thr_lock", { projectId });
+  await store.attach(t.id, "thr_lock");
+  threads.state.readError = new Error("database locked");
+  try {
+    await assert.rejects(() => store.moveTicket(t.id, "done"), /database locked/);
+    await assert.rejects(() => store.deleteTicket(t.id), /database locked/);
+  } finally {
+    threads.state.readError = null;
+  }
+  assert.equal((await store.ticketRow(t.id)).stage, "backlog");
+  assert.equal(threads.state.threads.get("thr_lock").archivedAt, null);
+  assert.equal((await boardData.detail(t.id)).threads.length, 1);
+});
+
+test("leaving Done keeps the thread when it cannot be read", async () => {
+  const projectId = project();
+  const t = await store.createTicket({ projectId, title: "Return", kind: "task" });
+  threads.addThread("thr_back", { projectId });
+  await store.attach(t.id, "thr_back");
+  await store.moveTicket(t.id, "done");
+  threads.state.readError = new Error("database locked");
+  try {
+    await assert.rejects(() => store.moveTicket(t.id, "in-progress"), /database locked/);
+  } finally {
+    threads.state.readError = null;
+  }
+  assert.equal((await store.ticketRow(t.id)).stage, "done");
+  assert.equal((await boardData.detail(t.id)).archivedByDone.length, 1);
+});
+
+test("a proposal can sit under an accepted parent, and a proposal cannot parent or block", async () => {
+  const projectId = project();
+  const parent = await store.createTicket({ projectId, title: "Parent", kind: "task" });
+  const child = await store.createTicket({ projectId, title: "Child", kind: "task", proposed: true, parentId: parent.id });
+  assert.equal(child.proposed, true);
+  assert.equal(child.parentId, parent.id);
+  const proposal = await store.createTicket({ projectId, title: "Proposal", kind: "task", proposed: true });
+  await assert.rejects(() => store.createTicket({ projectId, title: "Nested", kind: "task", parentId: proposal.id }), /Accept the parent/);
+  await assert.rejects(() => store.createTicket({ projectId, title: "Blocked", kind: "task", blockerIds: [proposal.id] }), /before it can block/);
+  await assert.rejects(() => store.proposeMove(parent.id, parent.stage), /already in/);
+  await assert.rejects(() => store.createTicket({ projectId, title: "Early", kind: "story", stage: "in-progress", checkStart: true }), /can't start in/);
+});
+
 test("a failed or corrupt kv value is reset, but a failed read is not invented", async () => {
   await store.kvSet("broken", "not json");
   assert.deepEqual(await store.kvJson("broken", { fresh: true }), { fresh: true });

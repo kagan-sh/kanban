@@ -2,6 +2,11 @@
 // Delivery rules shared by the CLI, the store and the board.
 
 export const KINDS = ["story", "bug", "task"];
+
+/** @param {string | null | undefined} kind */
+export function kindWord(kind) {
+  return kind ? kind[0].toUpperCase() + kind.slice(1) : "No kind";
+}
 export const BUG_TEMPLATE = "## Steps to reproduce\n\n1. \n\n## Expected\n\n\n## Actual\n\n\n## Environment\n\n";
 const BUG_SECTIONS = ["Steps to reproduce", "Expected", "Actual"];
 export const AGE_WARN_DAYS = 14;

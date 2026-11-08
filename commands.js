@@ -35,7 +35,7 @@ export async function moveCommand(job, ctx) {
   const wanted = stage(ctx.args[0]);
   const resolution = ctx.flags["wont-do"] ? "wont-do" : "done";
   if (ctx.flags["wont-do"] && wanted !== "done") throw new Error("--wont-do only goes with move done");
-  if (wanted === "done" && settings().agentMoveToDone !== true) throw new Error("Agents can move tickets to Done is off");
+  if (wanted === "done" && job.threadId && settings().agentMoveToDone !== true) throw new Error("Agents can move tickets to Done is off");
   const t = await store.resolveTicket(ctx.args[1], ctx.ticketContext);
   if (job.threadId && settings().agentAutoApproveMoves === false) {
     if (ctx.flags["wont-do"]) throw new Error("Won't do cannot be proposed while moves wait for approval. Run `kg kanban move done` and tell the person to pick Won't do when they accept.");
@@ -93,7 +93,7 @@ async function addTicket(job, ctx, words) {
   const proposed = Boolean(job.threadId && settings().agentAutoApproveAdds !== true);
   const created = await store.createTicket({
     projectId: ctx.project(), title: words.join(" "), description: ctx.flags.desc, stage: wanted, kind,
-    blockerIds: await resolveAll(ctx.flags["blocked-by"], ctx.ticketContext), parentId, proposed,
+    blockerIds: await resolveAll(ctx.flags["blocked-by"], ctx.ticketContext), parentId, proposed, checkStart: true,
   });
   return { ...created, note: proposed ? `Proposed #${created.number} ${created.title}. The person accepts it on the board.` : `Created #${created.number} ${created.title}.` };
 }

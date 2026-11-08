@@ -27,7 +27,7 @@ export function renderLoose(view, cx, colors, radius, loose) {
       const menu = new DropdownMenu(`loose-menu:${thread.id}`, "···")
         .item("Open thread", cx => view.act(cx, () => host.openThread(thread.id)))
         .item("New ticket", cx => view.act(cx, () => store.createTicket({ projectId: thread.projectId, title: thread.title, threadId: thread.id, kind: "story" })))
-        .item("In progress", cx => view.act(cx, () => store.createTicket({ projectId: thread.projectId, title: thread.title, threadId: thread.id, stage: "in-progress", kind: "story" })))
+        .item("Start in progress", cx => view.act(cx, () => store.createTicket({ projectId: thread.projectId, title: thread.title, threadId: thread.id, stage: "in-progress", kind: "story", checkStart: true })))
         .item("Add to ticket…", () => view.attachDialog(thread.projectId, thread.id))
         .item("Archive thread", cx => view.act(cx, async () => { await threads.archive(thread.id); store.touch(); }));
       row.child(new ThreadStatus(thread.id))

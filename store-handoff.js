@@ -65,7 +65,7 @@ export async function handoffsWaitingOn(threadId) {
 
 export async function handoffComments(id) {
   await ready();
-  const rows = await query("SELECT thread_id, body FROM comment WHERE ticket_id = ? AND thread_id IS NOT NULL AND body LIKE '%## Handoff%' ORDER BY created_at", [id]);
+  const rows = await query("SELECT s.thread_id, c.body FROM handoff_source s JOIN comment c ON c.id = s.comment_id WHERE s.ticket_id = ? AND s.comment_id IS NOT NULL ORDER BY c.created_at", [id]);
   return rows.map(row => ({ thread_id: String(row.thread_id), body: String(row.body) }));
 }
 
@@ -97,7 +97,7 @@ export async function writeHandoffFailureFor(threadId, error) {
 
 export async function staleHandoffs(ms) {
   await ready();
-  return query("SELECT ticket_id, error FROM handoff WHERE status = 'handing-off' AND EXISTS (SELECT 1 FROM handoff_source s WHERE s.ticket_id = handoff.ticket_id AND s.asked_at < ?)", [Date.now() - ms]);
+  return query("SELECT ticket_id, error FROM handoff WHERE status = 'handing-off' AND EXISTS (SELECT 1 FROM handoff_source s WHERE s.ticket_id = handoff.ticket_id AND s.comment_id IS NULL AND s.asked_at < ?)", [Date.now() - ms]);
 }
 
 export async function deleteHandoff(id) {

@@ -34,7 +34,7 @@ export function dot(cx, color) {
   return div().w(6).h(6).rounded(3).bg(color);
 }
 export function select(id, rows, label, callback) {
-  return new Select(id, () => rows, row => div().child(String(/** @type {{label: string}} */ (row).label)), callback).placeholder(label);
+  return new Select(id, () => rows, row => div().child(String(/** @type {{label: string}} */ (row).label)), callback).placeholder(label).max_w("20rem").self_start().menu_width(320);
 }
 export function boardLink(projectId, ticketId) { return host.openPanel("board", { projectId, ticketId }); }
 export function requestBoardMove(ticket, stage) {

@@ -8,6 +8,7 @@ export const state = {
   pasted: [],
   spawned: [],
   output: "",
+  readError: null,
 };
 
 export function reset() {
@@ -17,6 +18,7 @@ export function reset() {
   state.pasted.length = 0;
   state.spawned.length = 0;
   state.output = "";
+  state.readError = null;
 }
 
 export function addThread(id, extra = {}) {
@@ -29,6 +31,7 @@ export function addThread(id, extra = {}) {
 }
 
 export async function get(id) {
+  if (state.readError) throw state.readError;
   const thread = state.threads.get(id);
   if (!thread) throw new Error(`No thread ${id}`);
   return thread;

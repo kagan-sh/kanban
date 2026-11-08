@@ -1,5 +1,5 @@
 // @ts-check
-import { AGE_WARN_DAYS, daysInStage, startProblem } from "./rules.js";
+import { AGE_WARN_DAYS, daysInStage, kindWord, startProblem } from "./rules.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { KgButton, ThreadStatus } from "gpui-component";
@@ -60,7 +60,7 @@ function metaRow(view, t, cx, colors) {
       .child(dot(cx, colors.primary))
       .child(tiny("Needs you", cx, colors.foreground).font_weight(600)));
   }
-  if (t.kind) meta.push(chip(t.kind, cx));
+  if (t.kind) meta.push(chip(kindWord(t.kind), cx));
   if (t.stage === "done" && t.resolution === "wont-do") meta.push(chip("won't do", cx));
   const ac = criteriaLine(t.description, t.kind);
   if (ac) meta.push(tiny(ac, cx));

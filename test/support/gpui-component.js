@@ -33,6 +33,12 @@ export class Scroll {
 }
 export class Markdown { constructor(id, content) { return chained({ id, kind: "markdown", content }); } }
 export class ThreadStatus { constructor(id) { return chained({ id, kind: "thread-status" }); } }
+export class Tag { constructor() { return chained({ kind: "tag" }); } }
+export class Tab { constructor() { return chained({ kind: "tab" }); } }
+export class TabBar { constructor(id) { return chained({ id, kind: "tabs" }); } }
+export class WarningAlert {
+  constructor(id, message) { return chained({ id, kind: "alert", content: message, text: message }); }
+}
 export function ScrollbarHandle() { return { name: `scroll_${Math.random()}` }; }
 
 export function InputState(name) {

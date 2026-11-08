@@ -6,7 +6,7 @@ import { register } from "node:module";
 register(new URL("./test/support/kagan-loader.mjs", import.meta.url).href);
 const { renderTicket, refreshTicket } = await import("./ticket.js");
 const { element } = await import("./test/support/gpui-kit.js");
-const { cx, view, ids, labels, texts } = await import("./test/support/view.js");
+const { cx, view, ids, labels, texts, walk } = await import("./test/support/view.js");
 
 function detail(extra = {}) {
   return {
@@ -33,14 +33,16 @@ function fake(ticket) {
 test("the ticket page shows its title, description, threads, relationships and actions", () => {
   const t = detail();
   const page = renderTicket(fake(t), cx());
-  assert.match(texts(page).join(" "), /Ship it/);
+  assert.ok(labels(page).includes("Ship it"));
+  assert.ok(ids(page).includes("edit-title"));
+  assert.ok(ids(page).includes("tab-overview"));
   assert.match(texts(page).join(" "), /The description/);
   assert.ok(ids(page).includes("edit-ticket"));
   assert.ok(ids(page).includes("start-thread"));
   assert.ok(ids(page).includes("ticket-thread:thr_a"));
-  assert.ok(ids(page).includes("tab-overview"));
-  assert.ok(ids(page).includes("tab-activity"));
-  assert.ok(ids(page).includes("tab-reviews"));
+  assert.ok(labels(page).includes("Overview"));
+  assert.ok(labels(page).includes("Activity · 1"));
+  assert.ok(labels(page).includes("Reviews"));
 });
 
 test("a comment can be edited and deleted from the activity tab", () => {
@@ -65,6 +67,43 @@ test("the reviews tab shows repos, pull checks, changes and stage history", () =
   assert.ok(ids(page).includes("change:thr_a"));
   assert.match(texts(page).join(" "), /owner\/name/);
   assert.match(texts(page).join(" "), /Backlog/);
+});
+
+test("an empty ticket hides relationship labels and keeps the kind control compact", () => {
+  const t = detail({
+    stage: "backlog", kind: "story", description: "", threads: [], links: [], handoffSources: [],
+    comments: [], title: "bla",
+  });
+  const page = renderTicket(fake(t), cx());
+  const joined = texts(page).join(" ");
+  assert.match(joined, /Can't leave Backlog yet/);
+  assert.equal(joined.includes("Parent"), false);
+  assert.equal(joined.includes("Sub-tickets"), false);
+  assert.equal(joined.includes("Blocked by"), false);
+  assert.ok(labels(page).includes("Add a description"));
+  assert.ok(labels(page).includes("Story"));
+  assert.ok(labels(page).includes("Start thread"));
+  const kind = walk(page).find(item => (item.ids ?? []).includes("ticket-kind"));
+  assert.equal(kind.kind, "menu");
+  const tab = walk(page).find(item => (item.ids ?? []).includes("tab-overview"));
+  assert.deepEqual(tab.props.selected, [true]);
+  assert.ok(ids(page).includes("tab-activity"));
+});
+
+test("a peer ticket is offered as a parent, not an empty heading", () => {
+  const t = detail({ stage: "backlog", kind: "task", description: "Done enough", threads: [], links: [], handoffSources: [] });
+  const peer = { ...t, id: "tkt_2", number: 2, title: "Other", parentId: null, proposed: false };
+  const child = { ...t, id: "tkt_3", number: 3, title: "Child", parentId: t.id, proposed: false };
+  const v = fake(t);
+  v.data = { tickets: [t, peer, child], loose: [{ id: "thr_loose", title: "Spare", projectId: "prj_1" }] };
+  const page = renderTicket(v, cx());
+  const parentMenu = walk(page).find(item => (item.ids ?? []).includes("parent-ticket"));
+  const offered = (parentMenu.children ?? []).filter(kid => typeof kid?.label === "string").map(kid => kid.label);
+  assert.ok(labels(page).includes("Set parent"));
+  assert.ok(offered.includes("#2 Other"));
+  assert.equal(offered.includes("#3 Child"), false);
+  assert.ok(labels(page).includes("Attach a thread"));
+  assert.equal(texts(page).join(" ").includes("Parent"), false);
 });
 
 test("a failed ticket reload keeps the ticket open and shows the error", async () => {

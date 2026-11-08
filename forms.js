@@ -12,12 +12,12 @@ import { button, clickCx, primary, select, tiny } from "./ui.js";
 /** The fields a form shows, by the form the board has open. */
 export function renderForm(view, cx) {
   const form = formShell(view, cx);
-  const cancel = button("cancel-form", "Cancel", () => closeForm(view, cx));
+  const cancel = button("cancel-form", "Cancel", (cx) => closeForm(view, cx));
   if (view.form === "edit") ticketFields(form, view, cx, cancel);
   else if (["start", "handoff", "consolidate"].includes(view.form)) threadFields(form, view, cx, cancel);
   else if (view.form === "attach") attachFields(form, view, cx, cancel);
   else if (view.form === "rules") rulesFields(form, view, cx, cancel);
-  else if (view.form === "repos" || view.form === "import") repoFields(form, view, cx, cancel);
+  else if (view.form === "repos" || view.form === "import" || view.form === "link") repoFields(form, view, cx, cancel);
   return form;
 }
 
@@ -142,6 +142,19 @@ function rulesFields(form, view, cx, cancel) {
 
 function repoFields(form, view, cx, cancel) {
   const colors = cx.theme().colors;
+  if (view.form === "link") {
+    form.child(formTitle("Link a repo"));
+    form.child(tiny("Links a GitHub repo to this project. Import issues from the board.", cx));
+    form.child(h_flex().gap_2().items_center()
+      .child(new Input(view.repo).aria_label("Repo to link").flex_1())
+      .child(button("link-repo", "Link", cx => view.act(cx, async () => {
+        await store.linkRepo(view.projectId, await github.normalizeRepo(view.repo.value()));
+        view.repo.set_value("");
+        view.form = null;
+      }))));
+    form.child(h_flex().justify_end().child(cancel));
+    return;
+  }
   if (view.form === "import") {
     form.child(formTitle("Import issue"));
     form.child(tiny("Copies the issue onto the bottom of Backlog. Nothing is written to GitHub.", cx));

@@ -96,6 +96,27 @@ test("a failed successor settle resumes the saved thread instead of spawning ano
   assert.ok(host.state.pasted.some(item => item.id === "thr_next"));
 });
 
+test("a source that has not written anything yet stays handing off", async () => {
+  const ticket = await setup();
+  await handoff.startHandoff(ticket.id, { sourceThreadIds: ["thr_s"], persona: null, prompt: "Go" });
+  await flush();
+  await handoff.collectHandoff("thr_s");
+  assert.equal((await handoffStore.readHandoff(ticket.id)).status, "handing-off");
+  assert.equal(threads.state.spawned.length, 0);
+});
+
+test("a source that cannot be read stays waiting to archive", async () => {
+  const ticket = await setup(["thr_src"]);
+  await handoffStore.saveHandoffJob(ticket.id, { sourceThreadIds: ["thr_src"], baselines: { thr_src: 0 }, nextThreadId: "thr_next" }, "awaiting-archive", null);
+  threads.state.readError = new Error("database locked");
+  try {
+    await assert.rejects(() => handoff.archiveSources(ticket.id), /source thread/);
+  } finally {
+    threads.state.readError = null;
+  }
+  assert.equal((await handoffStore.readHandoff(ticket.id)).status, "awaiting-archive");
+});
+
 test("starting without a handoff spawns a successor and leaves sources live", async () => {
   const ticket = await setup(["thr_keep"]);
   await handoff.startHandoff(ticket.id, { sourceThreadIds: ["thr_keep"], persona: null, prompt: "Skip it" });

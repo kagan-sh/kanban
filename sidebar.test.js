@@ -27,11 +27,12 @@ test("a ticket row shows its number, title, glyph and next-stage action", () => 
   const line = SidebarList.prototype.itemRow.call(view, row, null, colorsValue, cx());
   assert.match(texts(line).join(" "), /#1/);
   assert.match(labels(line).join(" "), /Ship it/);
+  assert.equal(labels(line).includes("#1 Ship it"), false);
   assert.ok(ids(line).includes("row:tkt_1"));
   assert.ok(ids(line).includes("move-ticket:tkt_1:in-progress"));
 });
 
-test("a proposed row says Proposed, and a loose thread row offers Ticket", () => {
+test("a proposed row says Proposed, and a loose thread row offers New ticket", () => {
   const ticket = { id: "tkt_2", number: 2, title: "Maybe", stage: "backlog", projectId: "prj_1", proposed: true };
   const view = instance();
   const proposed = SidebarList.prototype.itemRow.call(view, { kind: "ticket", id: "tkt_2", ticket, threads: [], thread: null, depth: 0 }, null, colorsValue, cx());
@@ -39,6 +40,7 @@ test("a proposed row says Proposed, and a loose thread row offers Ticket", () =>
   const thread = { id: "thr_a", projectId: "prj_1", title: "Loose", status: "idle" };
   const loose = SidebarList.prototype.itemRow.call(view, { kind: "thread", id: "thr_a", ticket: null, thread, depth: 0 }, null, colorsValue, cx());
   assert.ok(ids(loose).includes("newtkt:thr_a"));
+  assert.ok(labels(loose).includes("New ticket"));
   assert.ok(ids(loose).includes("archive:thr_a"));
 });
 

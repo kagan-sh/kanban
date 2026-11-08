@@ -2,7 +2,6 @@
 import { KINDS, BUG_TEMPLATE, isGated, startProblem, newStartProblem } from "./rules.js";
 import { migrate, query, run, transaction } from "kagan/database";
 import * as threads from "kagan/threads";
-import { log } from "kagan/host";
 import { stage, text, rankFor, rankOrder, failInterruptedHandoff, moveScope, pendingScopeProblem, linkProblem, backlogRank } from "./model.js";
 
 function newId(prefix) {
@@ -198,8 +197,8 @@ export async function createTicketInner(input) {
   let parentId = null;
   if (input.parentId) {
     const parent = await ticketRow(input.parentId);
-    if (parent.projectId !== input.projectId) throw new Error("Sub-tickets need accepted tickets in the same project");
-    if (parent.proposed || input.proposed) throw new Error("Sub-tickets need accepted tickets in the same project");
+    if (parent.projectId !== input.projectId) throw new Error("A parent has to be a ticket in the same project");
+    if (parent.proposed) throw new Error("Accept the parent before adding a sub-ticket");
     parentId = parent.id;
   }
   const statements = [{
@@ -210,6 +209,7 @@ export async function createTicketInner(input) {
   for (const blockerId of input.blockerIds ?? []) {
     const blocker = await ticketRow(blockerId);
     if (blocker.projectId !== input.projectId) throw new Error("A blocker has to be a ticket in the same project");
+    if (blocker.proposed) throw new Error("Accept a ticket before it can block another");
     statements.push({ sql: "INSERT INTO ticket_block (blocked_id, blocker_id) VALUES (?, ?)", params: [id, blocker.id] });
   }
   if (input.threadId) statements.push({ sql: "INSERT INTO ticket_thread(thread_id, ticket_id, persona) VALUES (?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET ticket_id = excluded.ticket_id, persona = excluded.persona, archived_by_done = 0", params: [input.threadId, id, input.persona ?? null] });
@@ -265,6 +265,7 @@ export function proposeMove(id, wanted) {
     const t = await ticketRow(id);
     if (t.proposed) throw new Error("Accept the proposed ticket before proposing a move");
     const next = stage(wanted);
+    if (next === t.stage) throw new Error(`#${t.number} is already in ${next}`);
     const problem = isGated(t.stage, next, "done") ? startProblem(t) : null;
     if (problem) throw new Error(`Can't start #${t.number}: ${problem}.`);
     await run("UPDATE ticket SET pending_stage = ?, pending_scope = ? WHERE id = ?", [next, moveScope(await scopeTicket(id)), id]);
@@ -296,7 +297,7 @@ export function moveTicket(id, wanted, resolution = "done") {
     const links = await query("SELECT * FROM ticket_thread WHERE ticket_id = ?", [id]);
     if (wanted === "done" && t.stage !== "done") {
       for (const link of links) {
-        const thread = await readThread(String(link.thread_id)).catch((error) => { log("warn", `Couldn't read thread ${link.thread_id}: ${error}`); return null; });
+        const thread = await readThread(String(link.thread_id));
         if (!thread || thread.archivedAt !== null) continue;
         await threads.archive(thread.id);
         await run("UPDATE ticket_thread SET archived_by_done = 1 WHERE thread_id = ?", [thread.id]);
@@ -308,7 +309,7 @@ export function moveTicket(id, wanted, resolution = "done") {
     if (t.stage === "done" && wanted !== "done") {
       const restore = links.filter(l => l.archived_by_done);
       for (const link of restore) {
-        const thread = await readThread(String(link.thread_id)).catch((error) => { log("warn", `Couldn't read thread ${link.thread_id}: ${error}`); return null; });
+        const thread = await readThread(String(link.thread_id));
         if (!thread) { await run("DELETE FROM ticket_thread WHERE thread_id = ?", [String(link.thread_id)]); continue; }
         if (thread.environmentId) {
           const env = await threads.environment(thread.environmentId);
@@ -474,7 +475,7 @@ export function deleteTicket(id) {
   return serial(async () => {
     await ticketRow(id);
     for (const link of await query("SELECT thread_id FROM ticket_thread WHERE ticket_id = ?", [id])) {
-      const t = await threads.get(String(link.thread_id)).catch(() => null);
+      const t = await readThread(String(link.thread_id));
       if (t && t.archivedAt === null) await threads.archive(t.id);
     }
     await run("DELETE FROM ticket_block WHERE blocked_id = ? OR blocker_id = ?", [id, id]);

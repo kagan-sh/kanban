@@ -1,16 +1,16 @@
 // @ts-check
-import { KINDS, USER_STORY_WARNING, looksLikeUserStory, startProblem } from "./rules.js";
+import { KINDS, USER_STORY_WARNING, kindWord, looksLikeUserStory, startProblem } from "./rules.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { DropdownMenu, Markdown, Scroll, Textarea, ThreadStatus } from "gpui-component";
+import { DropdownMenu, KgButton, Markdown, Scroll, Tag, Textarea, ThreadStatus, WarningAlert } from "gpui-component";
 import * as host from "kagan/host";
 import * as threads from "kagan/threads";
 import * as store from "./store.js";
 import * as boardData from "./board-data.js";
 import * as github from "./github.js";
 import { briefingOf } from "./briefing.js";
-import { TITLES, canBlock, commentWhen, criteriaLine, descriptionPreview, threadStatusLine } from "./model.js";
-import { STATUS_WORD, button, divider, primary, select, tiny } from "./ui.js";
+import { TITLES, canBlock, canNest, commentWhen, criteriaLine, descriptionPreview, threadStatusLine } from "./model.js";
+import { STATUS_WORD, button, chip, clickCx, focusWhenMounted, primary, tiny } from "./ui.js";
 import { ago, threadTree } from "./ui-model.js";
 import { renderHandoffState, renderPendingMove } from "./cards.js";
 import { renderForm } from "./forms.js";
@@ -70,56 +70,128 @@ export function dismissBriefing(view) {
   view.briefing = null;
   if (view.ticket) return store.kvSet(`seen:${view.ticket.id}`, String(Date.now()));
   }
+const SECTIONS = ["overview", "activity", "reviews"];
+const STAGE_VARIANT = { backlog: "secondary", "in-progress": "info", review: "warning", done: "success" };
+
+function sheet() {
+  return v_flex().w_full().max_w("46rem").mx_auto().px_6();
+}
+function surface(cx) {
+  const colors = cx.theme().colors;
+  return v_flex().gap_3().p_4().rounded(cx.theme().radius.lg).bg(colors.surface).border_1().border_color(colors.border);
+}
+function heading(text) {
+  return div().font_weight(600).text_size(13).child(text);
+}
+function beginEdit(view, cx) {
+  view.section = "overview";
+  view.form = "edit";
+  view.title.set_value(view.ticket.title);
+  view.description.set_value(view.ticket.description ?? "");
+  cx.notify();
+  if (view.formFocus && cx.spawn) cx.spawn(() => focusWhenMounted(view.formFocus));
+}
+function kindMenu(view, ticket) {
+  const menu = new DropdownMenu("ticket-kind", kindWord(ticket.kind));
+  menu.item("No kind", cx => view.act(cx, () => store.editTicket(ticket.id, { kind: null })));
+  for (const kind of KINDS) menu.item(kindWord(kind), cx => view.act(cx, () => store.editTicket(ticket.id, { kind })));
+  return menu;
+}
+function pickMenu(id, label, choices, onPick) {
+  if (!choices.length) return null;
+  const menu = new DropdownMenu(id, label);
+  for (const choice of choices) menu.item(`#${choice.number} ${choice.title}`, cx => onPick(choice, cx));
+  return menu;
+}
+function sectionLabel(view, ticket, name) {
+  if (name === "activity" && ticket.comments.length) return `Activity · ${ticket.comments.length}`;
+  if (name === "reviews" && view.pulls.length) return `Reviews · ${view.pulls.length}`;
+  return name[0].toUpperCase() + name.slice(1);
+}
+
+function sectionTabs(view, t) {
+  const row = h_flex().gap_1().items_center();
+  for (const name of SECTIONS) {
+    row.child(new KgButton(`tab-${name}`).label(sectionLabel(view, t, name)).ghost().size("small")
+      .selected(view.section === name)
+      .on_click((a, b) => {
+        const next = clickCx(a, b);
+        if (name === "overview") view.form = null;
+        view.section = name;
+        next.notify();
+      }));
+  }
+  return row;
+}
 export function renderTicket(view, cx) {
   const t = view.ticket;
   const colors = cx.theme().colors;
-  const stageLine = `${TITLES[t.stage]}${t.stage === "done" && t.resolution === "wont-do" ? " · won't do" : ""}${t.pendingStage ? ` · Move to ${TITLES[t.pendingStage]} awaiting approval` : ""}`;
-  const head = h_flex().gap_3().px_5().pt_4().pb_2().items_center().flex_wrap()
-    .child(button("back-board", "Board", cx => { view.ticketId = null; view.form = null; view.pendingMove = null; cx.notify(); }))
-    .child(v_flex().gap_1().flex_1().min_w_0()
-      .child(h_flex().gap_2().items_baseline()
-        .child(tiny(`#${t.number}`, cx).text_size(15))
-        .child(div().font_weight(600).text_size(16).child(t.title)))
-      .child(tiny(stageLine, cx)))
-    .child(select("ticket-kind", [{ id: "none", label: "No kind" }, ...KINDS.map(kind => ({ id: kind, label: kind[0].toUpperCase() + kind.slice(1) }))], t.kind ? t.kind[0].toUpperCase() + t.kind.slice(1) : "No kind", (id, cx) => view.act(cx, () => store.editTicket(t.id, { kind: id === "none" ? null : id }))))
-    .child(view.attentionButtons(cx))
-    .child(view.menu(t, cx));
-  const tabs = h_flex().gap_1().px_5().items_center()
-    .child(button("tab-overview", "Overview", cx => { view.section = "overview"; view.form = null; cx.notify(); }))
-    .child(button("tab-activity", `Activity${t.comments.length ? ` · ${t.comments.length}` : ""}`, cx => { view.section = "activity"; cx.notify(); }))
-    .child(button("tab-reviews", `Reviews${view.pulls.length ? ` · ${view.pulls.length}` : ""}`, cx => { view.section = "reviews"; cx.notify(); }));
-  const body = v_flex().p_5().gap_4();
-  if (looksLikeUserStory(t.title)) body.child(tiny(USER_STORY_WARNING, cx));
-  if (t.proposed) body.child(h_flex().gap_2().child(button("accept-ticket", "Accept ticket", cx => view.act(cx, () => store.acceptTicket(t.id)))).child(button("dismiss-ticket", "Dismiss", cx => view.act(cx, async () => { await store.dismissTicket(t.id); view.ticketId = null; }))));
+  const chrome = sheet().pt_5().gap_4()
+    .child(h_flex().gap_2().items_center()
+      .child(button("back-board", "All tickets", cx => { view.ticketId = null; view.form = null; view.pendingMove = null; cx.notify(); }))
+      .child(div().flex_1())
+      .child(view.attentionButtons(cx))
+      .child(view.menu(t, cx, "Actions")))
+    .child(h_flex().gap_3().items_center()
+      .child(div().text_size(13).text_color(colors.muted_foreground).child(`#${t.number}`))
+      .child(new KgButton("edit-title").label(t.title).ghost().text_size(18).flex_1().min_w_0().tooltip("Edit title")
+        .on_click((a, b) => beginEdit(view, clickCx(a, b)))))
+    .child(metaRow(view, cx, t))
+    .child(sectionTabs(view, t));
+  const page = view.section === "activity" ? renderComments(view, cx, t) : view.section === "reviews" ? renderReviews(view, cx, t) : renderOverview(view, cx, t);
+  return v_flex().size_full().min_h_0().child(chrome).child(new Scroll(view.scroll).flex_1().min_h_0().child(sheet().pt_4().pb_8().child(page)));
+}
+function metaRow(view, cx, t) {
+  const row = h_flex().gap_2().items_center().flex_wrap()
+    .child(div().flex_shrink_0().child(kindMenu(view, t)))
+    .child(new Tag().variant(STAGE_VARIANT[t.stage] ?? "secondary").size("small").outline().child(TITLES[t.stage]));
+  if (t.stage === "done" && t.resolution === "wont-do") row.child(new Tag().variant("secondary").size("small").outline().child("Won't do"));
+  const ac = criteriaLine(t.description, t.kind);
+  if (ac) row.child(chip(ac, cx));
+  if (t.pendingStage) row.child(tiny(`Move to ${TITLES[t.pendingStage]} awaiting approval`, cx));
+  if (!t.proposed && t.stage !== "done") row.child(primary("start-thread", "Start thread", cx => view.act(cx, () => view.prepare("start", t))).ml_auto().flex_shrink_0());
+  return row;
+}
+function renderOverview(view, cx, t) {
+  const body = v_flex().gap_4();
+  if (looksLikeUserStory(t.title)) body.child(new WarningAlert("title-note", USER_STORY_WARNING).size("small"));
+  if (t.proposed) body.child(h_flex().gap_2()
+    .child(primary("accept-ticket", "Accept ticket", cx => view.act(cx, () => store.acceptTicket(t.id))))
+    .child(button("dismiss-ticket", "Dismiss", cx => view.act(cx, async () => { await store.dismissTicket(t.id); view.ticketId = null; }))));
   if (t.pendingStage) body.child(renderPendingMove(view, t, cx, "detail"));
   const job = renderHandoffState(view, t, cx, "detail");
   if (job) body.child(job);
-
-  if (view.section === "overview") {
-    if (view.briefing) body.child(renderBriefing(view, cx));
-    if (t.proposed) body.child(tiny(descriptionPreview(t.description) ?? "No description", cx));
-    else {
-      const ac = criteriaLine(t.description, t.kind);
-      if (ac) body.child(tiny(ac, cx));
-      const held = t.stage === "backlog" ? startProblem(t) : null;
-      if (held) body.child(tiny(`Can't leave Backlog yet: ${held}.`, cx));
-      body.child(new Markdown(`description:${t.id}`, t.description || "Add a description"));
-      body.child(h_flex().gap_2()
-        .child(button("edit-ticket", "Edit ticket…", cx => { view.form = "edit"; view.title.set_value(t.title); view.description.set_value(t.description); cx.notify(); }))
-        .child(button("start-thread", "Start thread", cx => view.act(cx, () => view.prepare("start", t)))));
-    }
-    if (view.form) body.child(renderForm(view, cx));
-    if (!t.proposed) {
-      body.child(renderRelationships(view, cx, t));
-      body.child(renderThreads(view, cx, t));
-    }
-  } else if (view.section === "activity") {
-    body.child(renderComments(view, cx, t));
-  } else {
-    body.child(renderReviews(view, cx, t));
+  if (view.briefing) body.child(renderBriefing(view, cx));
+  if (t.proposed) {
+    body.child(tiny(descriptionPreview(t.description) ?? "No description", cx));
+    return body;
   }
-  return v_flex().size_full().min_h_0().child(head).child(tabs).child(new Scroll(view.scroll).flex_1().min_h_0().child(body));
+  const held = t.stage === "backlog" ? startProblem(t) : null;
+  if (held) body.child(new WarningAlert("start-gate", `Can't leave Backlog yet: ${held}.`).size("small"));
+  if (view.form === "edit") body.child(renderForm(view, cx));
+  else body.child(renderDescription(view, cx, t));
+  if (view.form && view.form !== "edit" && view.form !== "attach") body.child(renderForm(view, cx));
+  const relationships = renderRelationships(view, cx, t);
+  if (relationships) body.child(relationships);
+  body.child(renderThreads(view, cx, t));
+  return body;
+}
+function renderDescription(view, cx, t) {
+  const card = surface(cx);
+  if (!t.description) {
+    card.child(heading("Description"));
+    card.child(new KgButton("edit-ticket").label("Add a description").outline().self_start().on_click((a, b) => beginEdit(view, clickCx(a, b))));
+    if (t.kind === "story") card.child(tiny("Put the story here, including a ## Acceptance criteria checklist.", cx));
+    else if (t.kind === "bug") card.child(tiny("Fill in steps to reproduce, expected, and actual.", cx));
+    return card;
   }
+  card.child(h_flex().items_center()
+    .child(heading("Description"))
+    .child(div().flex_1())
+    .child(button("edit-ticket", "Edit", cx => beginEdit(view, cx))));
+  card.child(new Markdown(`description:${t.id}`, t.description));
+  return card;
+}
 export function renderBriefing(view, cx) {
   const colors = cx.theme().colors;
   const b = view.briefing;
@@ -154,77 +226,95 @@ export function renderBriefing(view, cx) {
   }
   return card;
   }
+function linkedTicket(view, cx, ticket, openId, unlinkId, unlinkTip, unlink) {
+  const stage = `${TITLES[ticket.stage] ?? ""}${ticket.resolution === "wont-do" ? " · won't do" : ""}`;
+  const row = h_flex().gap_2().items_center()
+    .child(button(openId, `#${ticket.number} ${ticket.title}`, cx => view.openTicket(ticket.id, cx)).flex_1().min_w_0())
+    .child(tiny(stage, cx));
+  if (unlinkId) row.child(button(unlinkId, "Remove", cx => view.act(cx, unlink)).tooltip(unlinkTip));
+  return row;
+}
+function relationGroup(section, cx, label, rows, menu) {
+  if (!rows.length && !menu) return;
+  if (rows.length) section.child(tiny(label, cx));
+  for (const row of rows) section.child(row);
+  if (menu) section.child(menu);
+}
 export function renderRelationships(view, cx, t) {
-  const colors = cx.theme().colors;
-  const section = v_flex().gap_2().pt_3();
-  section.child(divider(colors));
-  section.child(div().font_weight(600).text_size(12).child("Relationships"));
-  section.child(tiny("Parent", cx));
-  if (t.parent) section.child(h_flex().gap_2().items_center()
-    .child(button(`parent-open:${t.parent.id}`, `#${t.parent.number} ${t.parent.title}`, cx => view.openTicket(t.parent.id, cx)).flex_1())
-    .child(button(`unparent:${t.id}`, "×", cx => view.act(cx, () => store.setParent(t.id, null))).tooltip("Take it out of its parent")));
-  else {
-    const choices = view.data.tickets.filter(p => p.id !== t.id && p.projectId === t.projectId && !p.proposed);
-    if (choices.length) section.child(select("parent-ticket", choices.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` })), "Set parent…", (id, cx) => view.act(cx, () => store.setParent(t.id, id))));
-  }
-  section.child(tiny("Sub-tickets", cx));
-  for (const child of t.subTickets ?? []) section.child(h_flex().gap_2().items_center()
-    .child(button(`sub:${child.id}`, `#${child.number} ${child.title} · ${TITLES[child.stage]}${child.resolution === "wont-do" ? " · won't do" : ""}`, cx => view.openTicket(child.id, cx)).flex_1())
-    .child(button(`unsub:${child.id}`, "×", cx => view.act(cx, () => store.setParent(child.id, null))).tooltip("Take it out of this ticket")));
-  const childChoices = view.data.tickets.filter(p => p.id !== t.id && p.projectId === t.projectId && !p.proposed && !p.parentId);
-  if (childChoices.length) section.child(select("add-sub", childChoices.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` })), "Add sub-ticket", (id, cx) => view.act(cx, () => store.setParent(id, t.id))));
-  section.child(tiny("Blocked by", cx));
-  for (const blocker of t.blockedBy ?? []) section.child(h_flex().gap_2().items_center()
-    .child(button(`open-blocker:${blocker.id}`, `#${blocker.number} ${blocker.title} · ${TITLES[blocker.stage]}`, cx => view.openTicket(blocker.id, cx)).flex_1())
-    .child(button(`remove-blocker:${blocker.id}`, "×", cx => view.act(cx, () => store.unblockTicket(t.id, blocker.id))).tooltip("Remove blocker")));
+  const parentChoices = t.parent ? [] : view.data.tickets.filter(p => canNest(view.data.tickets, t.id, p.id));
+  const childChoices = view.data.tickets.filter(p => !p.parentId && canNest(view.data.tickets, p.id, t.id));
   const blockerChoices = view.data.tickets.filter(p => canBlock(view.data.tickets, t.id, p.id));
-  if (blockerChoices.length) section.child(select("add-blocker", blockerChoices.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` })), "Add blocker", (id, cx) => view.act(cx, () => store.blockTicket(t.id, id))));
-  if ((t.blocks ?? []).length) {
-    section.child(tiny("Blocks", cx));
-    for (const blocked of t.blocks) section.child(button(`blocks:${blocked.id}`, `#${blocked.number} ${blocked.title}`, cx => view.openTicket(blocked.id, cx)));
-  }
+  const subs = t.subTickets ?? [];
+  const blockedBy = t.blockedBy ?? [];
+  const blocks = t.blocks ?? [];
+  if (!t.parent && !subs.length && !blockedBy.length && !blocks.length && !t.issue && !parentChoices.length && !childChoices.length && !blockerChoices.length) return null;
+  const section = surface(cx);
+  section.child(heading("Relationships"));
+  relationGroup(section, cx, "Parent", t.parent ? [linkedTicket(view, cx, t.parent, `parent-open:${t.parent.id}`, `unparent:${t.id}`, "Take it out of its parent", () => store.setParent(t.id, null))] : [], pickMenu("parent-ticket", "Set parent", parentChoices, (choice, cx) => view.act(cx, () => store.setParent(t.id, choice.id))));
+  relationGroup(section, cx, "Sub-tickets", subs.map(child => linkedTicket(view, cx, child, `sub:${child.id}`, `unsub:${child.id}`, "Take it out of this ticket", () => store.setParent(child.id, null))), pickMenu("add-sub", "Add sub-ticket", childChoices, (choice, cx) => view.act(cx, () => store.setParent(choice.id, t.id))));
+  relationGroup(section, cx, "Blocked by", blockedBy.map(blocker => linkedTicket(view, cx, blocker, `open-blocker:${blocker.id}`, `remove-blocker:${blocker.id}`, "Remove blocker", () => store.unblockTicket(t.id, blocker.id))), pickMenu("add-blocker", "Add blocker", blockerChoices, (choice, cx) => view.act(cx, () => store.blockTicket(t.id, choice.id))));
+  relationGroup(section, cx, "Blocks", blocks.map(blocked => linkedTicket(view, cx, blocked, `blocks:${blocked.id}`)), null);
   if (t.issue) section.child(button("open-issue", `Copied from ${t.issue.repo}#${t.issue.number}`, cx => view.act(cx, () => host.openUrl(t.issue.url))));
   return section;
-  }
+}
 export function renderThreads(view, cx, t) {
   const colors = cx.theme().colors;
-  const section = v_flex().gap_2().pt_3();
-  section.child(divider(colors));
+  const section = surface(cx);
   const quiet = threadStatusLine(t.threads);
-  section.child(h_flex().gap_2().items_baseline()
-    .child(div().font_weight(600).text_size(12).child(`Threads · ${t.threads.length}`))
-    .when(Boolean(quiet), el => el.child(tiny(String(quiet).replace("Thread status · ", ""), cx))));
+  section.child(h_flex().gap_2().items_center()
+    .child(heading("Threads"))
+    .child(div().flex_1())
+    .when(Boolean(quiet), el => el.child(tiny(String(quiet).replace("Thread status · ", ""), cx)))
+    .when(t.threads.length > 0 && !quiet, el => el.child(tiny(String(t.threads.length), cx))));
   const archived = (t.archivedByDone ?? []).filter(thread => !t.threads.some(live => live.id === thread.id));
-  if (archived.length) section.child(tiny(`${archived.length} archived by Done · moving out of Done brings them back`, cx));
+  if (archived.length) section.child(tiny(`${archived.length} archived by Done. Moving out of Done brings them back.`, cx));
+  if (!t.threads.length) section.child(tiny(t.stage === "done" ? "Done archived the threads on this ticket." : "Nothing is working on this yet.", cx));
   for (const [thread, depth] of threadTree(t.threads)) {
     const project = view.projects.find(p => p.id === thread.projectId);
     const link = (t.links ?? []).find(item => item.threadId === thread.id);
     const menu = new DropdownMenu(`thread-menu:${thread.id}`, "···")
       .item(thread.pinned ? "Unpin" : "Pin", cx => view.act(cx, () => threads.setPinned(thread.id, !thread.pinned)))
-      .item("Remove thread from ticket", cx => view.act(cx, () => store.detach(thread.id)))
+      .item("Remove from ticket", cx => view.act(cx, () => store.detach(thread.id)))
       .item("Archive thread", cx => view.act(cx, async () => { await threads.archive(thread.id); store.touch(); }));
-    section.child(h_flex().gap_2().items_center().pl(`${depth * 0.75}rem`)
+    section.child(h_flex().gap_2().items_center().px_2().py_1().rounded(cx.theme().radius.md).bg(colors.background).pl(`${0.5 + depth * 0.75}rem`)
       .child(new ThreadStatus(thread.id))
-      .child(button(`ticket-thread:${thread.id}`, `${depth ? "↳ " : ""}${thread.title}${thread.projectId !== t.projectId ? ` · ${project?.name ?? thread.projectId}` : ""}${link?.persona ? ` · ${link.persona}` : ""}`, cx => view.act(cx, () => host.openThread(thread.id))).flex_1().min_w_0())
+      .child(button(`ticket-thread:${thread.id}`, `${thread.title}${thread.projectId !== t.projectId ? ` · ${project?.name ?? thread.projectId}` : ""}${link?.persona ? ` · ${link.persona}` : ""}`, cx => view.act(cx, () => host.openThread(thread.id))).flex_1().min_w_0())
       .child(menu));
   }
-  if (!t.threads.length) section.child(tiny("No live thread.", cx));
+  if (view.form === "attach") section.child(renderForm(view, cx));
   if (t.stage !== "done") {
-    section.child(h_flex().gap_2().flex_wrap()
-      .child(button("attach-thread", "Attach a thread with no ticket", cx => { view.form = "attach"; cx.notify(); }))
-      .when(t.handoffSources.length > 0, el => el.child(button("handoff-thread", "Hand off…", cx => view.act(cx, () => view.prepare("handoff", t)))))
-      .when(t.handoffSources.length > 1, el => el.child(button("consolidate-threads", "Consolidate…", cx => view.act(cx, () => view.prepare("consolidate", t))))));
+    const loose = view.data.loose.filter(thread => thread.projectId === t.projectId);
+    const actions = h_flex().gap_2().flex_wrap().items_center();
+    if (loose.length) actions.child(button("attach-thread", loose.length === 1 ? "Attach a thread" : `Attach a thread · ${loose.length}`, cx => { view.form = "attach"; cx.notify(); }));
+    if (t.handoffSources.length > 0) actions.child(button("handoff-thread", "Hand off…", cx => view.act(cx, () => view.prepare("handoff", t))));
+    if (t.handoffSources.length > 1) actions.child(button("consolidate-threads", "Consolidate…", cx => view.act(cx, () => view.prepare("consolidate", t))));
+    if (loose.length || t.handoffSources.length) section.child(actions);
   }
   return section;
-  }
+}
+function commentComposer(view, cx, t) {
+  const draft = String(view.comment?.value?.() ?? "");
+  const editing = Boolean(view.editCommentId);
+  const composer = surface(cx);
+  composer.child(new Textarea(view.comment).aria_label(editing ? "Edit comment" : "Add a comment"));
+  composer.child(h_flex().gap_2().justify_end()
+    .when(editing, el => el.child(button("cancel-comment", "Cancel", cx => { view.editCommentId = null; view.comment.set_value(""); cx.notify(); })))
+    .child(primary("save-comment", editing ? "Save" : "Comment", cx => view.act(cx, async () => {
+      const body = view.comment.value();
+      if (view.editCommentId) await store.editComment(view.editCommentId, body);
+      else await store.addComment(t.id, { body });
+      view.editCommentId = null; view.comment.set_value("");
+    })).disabled(view.busy || !draft.trim())));
+  return composer;
+}
 export function renderComments(view, cx, t) {
   const colors = cx.theme().colors;
-  const section = v_flex().gap_3().pt_3();
-  section.child(divider(colors));
+  const section = v_flex().gap_4();
   if (!t.comments.length) section.child(tiny("No comments yet.", cx));
   for (const comment of t.comments) {
     const who = comment.githubLogin ? `@${comment.githubLogin} on GitHub` : comment.persona ?? comment.threadId ?? "You";
     const when = commentWhen(comment.createdAt);
+    const editing = view.editCommentId === comment.id;
     const head = h_flex().gap_2().items_baseline()
       .child(tiny(who, cx, colors.foreground).font_weight(600))
       .when(Boolean(comment.threadId), el => el.child(button(`comment-thread:${comment.id}`, "Open thread", cx => view.act(cx, () => host.openThread(comment.threadId))).text_size(11)))
@@ -232,35 +322,41 @@ export function renderComments(view, cx, t) {
       .when(comment.updatedAt !== comment.createdAt, el => el.child(tiny("· edited", cx)))
       .child(h_flex().flex_1().justify_end()
         .child(button(`comment-edit:${comment.id}`, "Edit", cx => { view.editCommentId = comment.id; view.comment.set_value(comment.body); cx.notify(); }))
-        .child(button(`comment-delete:${comment.id}`, "Delete", cx => view.act(cx, () => store.deleteComment(comment.id)))));
-    section.child(v_flex().gap_1().child(head).child(new Markdown(comment.id, comment.body)));
+        .child(button(`comment-delete:${comment.id}`, "Delete", cx => {
+          window.open_dialog(() => v_flex().gap_3()
+            .child("Delete this comment?")
+            .child(h_flex().gap_2().justify_end()
+              .child(button(`cancel-delete-comment:${comment.id}`, "Cancel", () => window.close_dialog()))
+              .child(primary(`confirm-delete-comment:${comment.id}`, "Delete comment", cx => {
+                window.close_dialog();
+                view.act(cx, () => store.deleteComment(comment.id));
+              }))));
+        })));
+    const block = v_flex().gap_1().px_1().child(head);
+    block.child(editing ? commentComposer(view, cx, t) : new Markdown(comment.id, comment.body));
+    section.child(block);
   }
-  section.child(new Textarea(view.comment).aria_label(view.editCommentId ? "Edit comment" : "Add a comment"));
-  section.child(h_flex().gap_2().justify_end()
-    .when(Boolean(view.editCommentId), el => el.child(button("cancel-comment", "Cancel", cx => { view.editCommentId = null; view.comment.set_value(""); cx.notify(); })))
-    .child(primary("save-comment", view.editCommentId ? "Save" : "Comment", cx => view.act(cx, async () => {
-      if (view.editCommentId) await store.editComment(view.editCommentId, view.comment.value());
-      else await store.addComment(t.id, { body: view.comment.value() });
-      view.editCommentId = null; view.comment.set_value("");
-    })).disabled(view.busy)));
+  if (!view.editCommentId) section.child(commentComposer(view, cx, t));
   return section;
-  }
+}
 export function renderReviews(view, cx, t) {
   const colors = cx.theme().colors;
-  const section = v_flex().gap_3().pt_3();
-  section.child(divider(colors));
-  section.child(div().font_weight(600).text_size(12).child("Changes"));
+  const section = surface(cx).gap_4();
+  section.child(heading("Changes"));
   if (!view.changes.length) section.child(tiny("No changed repo is readable for this ticket's threads.", cx));
   for (const change of view.changes) section.child(h_flex().gap_2().items_center()
     .child(button(`change:${change.threadId}`, change.title, cx => view.act(cx, () => host.openThread(change.threadId))).flex_1().min_w_0())
     .child(tiny(`+${change.added} −${change.removed}`, cx))
     .when(Boolean(change.base), el => el.child(tiny(`vs ${change.base}`, cx))));
-  section.child(div().font_weight(600).text_size(12).child("Repos"));
-  if (!view.ticketRepos.length) section.child(tiny("No repo is linked. Use Repos above to link one.", cx));
+  section.child(heading("Repos"));
+  if (view.form === "link") section.child(renderForm(view, cx));
+  else section.child(h_flex().gap_2().items_center()
+    .child(view.ticketRepos.length ? div().flex_1() : tiny("No repo is linked.", cx).flex_1())
+    .child(button("link-repos", view.ticketRepos.length ? "Link another" : "Link a repo", cx => view.act(cx, async () => { view.form = "link"; await github.maybeAutoLink(t.projectId); }))));
   for (const repo of view.ticketRepos) section.child(h_flex().gap_2().items_center()
     .child(tiny(repo, cx, colors.foreground).flex_1())
     .child(button(`unlink:${repo}`, "Unlink", cx => view.act(cx, () => store.unlinkRepo(t.projectId, repo)))));
-  section.child(div().font_weight(600).text_size(12).child("Pull requests"));
+  section.child(heading("Pull requests"));
   if (view.pullsError) section.child(tiny(`Couldn't read pull requests: ${view.pullsError}`, cx, colors.destructive));
   else if (!view.pulls.length) section.child(tiny("No pull request for this ticket's branch.", cx));
   for (const pull of view.pulls) {
@@ -270,7 +366,7 @@ export function renderReviews(view, cx, t) {
       .child(tiny(`${pull.isDraft ? "Draft" : pull.state}${pull.mergedAt ? " · merged" : ""}`, cx))
       .child(tiny(checks, cx, pull.checks.failed ? colors.destructive : colors.muted_foreground)));
   }
-  section.child(div().font_weight(600).text_size(12).child("Stage history"));
+  section.child(heading("Stage history"));
   for (const entry of t.stageHistory ?? []) {
     section.child(h_flex().gap_2().items_baseline()
       .child(tiny(TITLES[entry.stage] ?? entry.stage, cx, colors.foreground))

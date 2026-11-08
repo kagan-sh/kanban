@@ -65,3 +65,14 @@ test("a move request only applies to the ticket it named", () => {
   BoardPanel.prototype.consumeMove.call(instance, context);
   assert.deepEqual(moves, [["tkt_2", "review"]]);
 });
+
+test("a move request waits until its ticket is loaded", () => {
+  const instance = Object.create(BoardPanel.prototype);
+  instance.ticket = null;
+  instance.requestedMove = { stage: "review", ticketId: "tkt_1" };
+  const moves = [];
+  instance.move = () => moves.push("moved");
+  BoardPanel.prototype.consumeMove.call(instance, context);
+  assert.deepEqual(moves, []);
+  assert.deepEqual(instance.requestedMove, { stage: "review", ticketId: "tkt_1" });
+});

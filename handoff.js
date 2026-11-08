@@ -261,6 +261,7 @@ export function collectHandoff(threadId) {
       const source = pending.find(item => item.threadId === threadId);
       if (!source) continue;
       const output = await outputSince(threadId, source.baseline);
+      if (!output.trim()) continue;
       const { text, structured } = extractHandoff(output);
       if (!structured) {
         await saveJob(job.ticketId, job, "failed", "The thread replied without a handoff that has Goal and Verified.");
@@ -308,7 +309,9 @@ async function archiveSourcesInner(id) {
     if (threadId === job.nextThreadId) continue;
     // A source detached from the ticket since the ask is no longer ours to archive.
     if (!linked.has(threadId)) continue;
-    const thread = await store.readThread(threadId).catch((error) => { log("warn", `Couldn't read thread ${threadId}: ${error}`); return null; });
+    let thread;
+    try { thread = await store.readThread(threadId); }
+    catch (error) { failed.push(`${threadId}: ${error}`); continue; }
     if (!thread || thread.archivedAt !== null) continue;
     try { await threads.archive(threadId); } catch (error) { failed.push(`${threadId}: ${error}`); }
   }

@@ -63,7 +63,7 @@ export class SidebarList extends WatchedView {
     line.child(div().text_size(12).text_color(ticket ? glyphTone(ticket.stage, colors) : colors.muted_foreground)
       .child(ticket ? GLYPHS[ticket.stage] ?? "○" : "○"));
     if (ticket) line.child(tiny(`#${ticket.number}`, cx));
-    const title = ticket ? `#${ticket.number} ${ticket.title}` : row.thread.title;
+    const title = ticket ? ticket.title : row.thread.title;
     line.child(div().flex_1().min_w_0().overflow_hidden().child(button(`row:${row.id}`, title, cx => { this.selected = row.id; this.open(row, cx); })));
     if (row.thread) line.child(new ThreadStatus(row.thread.id));
     if (ticket?.proposed) line.child(chip("Proposed", cx));
@@ -75,7 +75,7 @@ export class SidebarList extends WatchedView {
     return line;
   }
   rowTail(row, ticket, line, cx) {
-    if (ticket && !row.thread) line.child(button(`board-ticket:${row.id}`, "Board", cx => this.act(cx, () => boardLink(ticket.projectId, ticket.id))).text_size(11));
+    if (ticket?.proposed && !row.thread) line.child(button(`board-ticket:${row.id}`, "Board", cx => this.act(cx, () => boardLink(ticket.projectId, ticket.id))).text_size(11));
     if (ticket && !ticket.proposed) {
       line.child(button(`open-ticket:${row.id}`, "Ticket", cx => this.act(cx, () => boardLink(ticket.projectId, ticket.id))).text_size(11));
       const next = NEXT[ticket.stage];
@@ -83,7 +83,7 @@ export class SidebarList extends WatchedView {
       line.child(button(`start-ticket:${row.id}`, "Start", cx => this.act(cx, () => requestBoardStart(ticket))).text_size(11));
     }
     if (row.thread && row.kind !== "ticket") line.child(button(`archive:${row.id}`, "Archive", cx => this.act(cx, async () => { await threads.archive(row.thread.id); store.touch(); })).text_size(11));
-    if (row.thread && !row.ticket) line.child(button(`newtkt:${row.id}`, "Ticket", cx => this.act(cx, () => store.createTicket({ projectId: row.thread.projectId, title: row.thread.title, threadId: row.thread.id }))).text_size(11));
+    if (row.thread && !row.ticket) line.child(button(`newtkt:${row.id}`, "New ticket", cx => this.act(cx, () => store.createTicket({ projectId: row.thread.projectId, title: row.thread.title, threadId: row.thread.id }))).text_size(11));
   }
   onKey(event, rows, cx) {
     if (!rows.length) return;

@@ -7,6 +7,7 @@ register(new URL("./test/support/kagan-loader.mjs", import.meta.url).href);
 const store = await import("./store.js");
 const handoffStore = await import("./store-handoff.js");
 const threads = await import("./test/support/kagan-threads.js");
+const { run } = await import("kagan/database");
 await store.ready();
 
 async function setup() {
@@ -29,7 +30,11 @@ test("a handoff job keeps its sources, baselines and saved comments", async () =
   job = await handoffStore.readHandoff(t.id);
   assert.equal(job.done, 1);
   assert.deepEqual(await handoffStore.pendingHandoffSources(t.id), []);
-  assert.equal((await handoffStore.handoffComments(t.id))[0].body.includes("### Goal"), true);
+  await store.addComment(t.id, { body: "## Handoff\n\n### Goal\nStray\n\n### Verified\nNo", threadId: "thr_other" });
+  const saved = await handoffStore.handoffComments(t.id);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].body.includes("### Goal"), true);
+  assert.equal(saved[0].body.includes("Stray"), false);
   await handoffStore.markHandoffAwaitingArchive(t.id, { ...job, nextThreadId: "thr_next" });
   assert.equal((await handoffStore.readHandoff(t.id)).status, "awaiting-archive");
   await handoffStore.deleteHandoff(t.id);
@@ -54,6 +59,18 @@ test("a job waiting on one source is found by that thread only", async () => {
   assert.equal((await handoffStore.handoffsWaitingOn("thr_other")).length, 0);
   await handoffStore.markHandoffFailed(t.id, "no reply");
   assert.equal((await handoffStore.handoffsWaitingOn("thr_s")).length, 0);
+});
+
+test("an answered source does not make a consolidate look stale", async () => {
+  const t = await setup();
+  threads.addThread("thr_w", { projectId: t.projectId });
+  await store.attach(t.id, "thr_w");
+  await handoffStore.saveHandoffJob(t.id, { sourceThreadIds: ["thr_s", "thr_w"], baselines: { thr_s: 0, thr_w: 0 } }, "handing-off", null);
+  await handoffStore.addHandoffComment(t.id, "thr_s", null, "## Handoff\n\n### Goal\nA\n\n### Verified\nB");
+  await run("UPDATE handoff_source SET asked_at = 0 WHERE ticket_id = ? AND thread_id = ?", [t.id, "thr_s"]);
+  assert.equal((await handoffStore.staleHandoffs(60_000)).some(row => row.ticket_id === t.id), false);
+  await run("UPDATE handoff_source SET asked_at = 0 WHERE ticket_id = ? AND thread_id = ?", [t.id, "thr_w"]);
+  assert.equal((await handoffStore.staleHandoffs(60_000)).some(row => row.ticket_id === t.id), true);
 });
 
 test("a Done move clears the handoff job and its settle progress", async () => {

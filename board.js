@@ -7,7 +7,7 @@ import * as host from "kagan/host";
 import * as store from "./store.js";
 import * as github from "./github.js";
 import * as handoff from "./handoff.js";
-import { PERSONAS, STAGES, TITLES, dropOnColumn, handoffSources, moveWarning, needsYou, planMove, rankOrder, sortColumn, threadMatches, ticketMatches } from "./model.js";
+import { PERSONAS, STAGES, TITLES, canNest, dropOnColumn, handoffSources, moveWarning, needsYou, planMove, rankOrder, sortColumn, threadMatches, ticketMatches } from "./model.js";
 import { listPersonas } from "./personas.js";
 import { WatchedView, button, clickCx, dot, focusWhenMounted, muted, primary, select, tiny } from "./ui.js";
 import { loadTicketExtras, refreshTicket, renderTicket } from "./ticket.js";
@@ -110,16 +110,16 @@ export class BoardPanel extends WatchedView {
   }
   consumeMove(cx) {
     const request = this.requestedMove;
-    if (!request) return;
+    if (!request || !this.ticket) return;
     this.requestedMove = null;
-    if (!this.ticket || this.ticket.id !== request.ticketId) return;
+    if (this.ticket.id !== request.ticketId) return;
     this.move(this.ticket, request.stage, cx);
   }
   consumeStart(cx) {
     const request = this.requestedStart;
-    if (!request) return;
+    if (!request || !this.ticket) return;
     this.requestedStart = null;
-    if (!this.ticket || this.ticket.id !== request.ticketId) return;
+    if (this.ticket.id !== request.ticketId) return;
     this.act(cx, () => this.prepare("start", this.ticket));
   }
   openTicket(id, cx) {
@@ -215,7 +215,10 @@ export class BoardPanel extends WatchedView {
         .child(dot(cx, cx.theme().colors.primary))
         .child(button("next-needs", `${need.length} ${word} you`, cx => this.jumpToNext(cx)).tooltip("Jump to the next one. Press N.")));
     }
-    if (looseCount || this.looseOpen) row.child(button("loose-toggle", `${looseCount} loose`, cx => this.openLoose(cx)).tooltip("Show threads on no ticket"));
+    if (looseCount || this.looseOpen) {
+      const label = looseCount === 1 ? "1 loose thread" : looseCount ? `${looseCount} loose threads` : "Loose threads";
+      row.child(button("loose-toggle", label, cx => this.openLoose(cx)).tooltip("Threads that are not on a ticket"));
+    }
     return row;
   }
   finishMove(cx, id, stage, resolution) {
@@ -240,7 +243,7 @@ export class BoardPanel extends WatchedView {
     });
   }
   pickParent(ticket) {
-    const peers = this.data.tickets.filter(p => p.id !== ticket.id && p.projectId === ticket.projectId && !p.proposed);
+    const peers = this.data.tickets.filter(p => canNest(this.data.tickets, ticket.id, p.id));
     window.open_dialog(() => v_flex().gap_3()
       .child(`Set the parent of #${ticket.number}.`)
       .child(select(`parent-pick:${ticket.id}`, [{ id: "none", label: "No parent" }, ...peers.map(p => ({ id: p.id, label: `#${p.number} ${p.title}` }))], "Choose a parent", (id, cx) => {
@@ -310,7 +313,7 @@ export class BoardPanel extends WatchedView {
     if (decision.action === "create") {
       const thread = this.threadRecord(decision.threadId);
       if (!thread) { this.error = "That thread is gone"; cx.notify(); return; }
-      this.act(cx, () => store.createTicket({ projectId: thread.projectId, title: thread.title, threadId: thread.id, stage: decision.stage, kind: "story" }));
+      this.act(cx, () => store.createTicket({ projectId: thread.projectId, title: thread.title, threadId: thread.id, stage: decision.stage, kind: "story", checkStart: true }));
     }
   }
   looseThreads() {
@@ -348,8 +351,8 @@ export class BoardPanel extends WatchedView {
     }
     this.finishMove(cx, ticket.id, plan.stage, plan.resolution);
   }
-  menu(ticket, _cx) {
-    const menu = new DropdownMenu(`ticket-menu:${ticket.id}`, "···");
+  menu(ticket, _cx, label = "···") {
+    const menu = new DropdownMenu(`ticket-menu:${ticket.id}`, label);
     menu.item("Open", cx => this.openTicket(ticket.id, cx));
     if (!ticket.proposed) {
       for (const stage of STAGES.filter(s => s !== ticket.stage)) menu.item(`Move to ${TITLES[stage]}`, cx => this.move(ticket, stage, cx));
@@ -412,18 +415,17 @@ export class BoardPanel extends WatchedView {
       });
     }
     const projectName = this.projects.find(p => p.id === this.projectId)?.name ?? "this project";
-    const left = h_flex().gap_1().items_center().min_w_0()
-      .child(select("board-project", projectRows, projectName, (id, cx) => { this.jumpIndex = -1; this.act(cx, async () => { this.projectId = id; this.form = null; await this.remember(); }); }))
+    const toolbar = h_flex().gap_2().px_5().pt_4().pb_2().items_center()
+      .child(div().max_w("16rem").min_w_0().child(select("board-project", projectRows, projectName, (id, cx) => { this.jumpIndex = -1; this.act(cx, async () => { this.projectId = id; this.form = null; await this.remember(); }); })))
       .child(button("repos", this.repos.length ? `Repos ${this.repos.length}` : "Repos", cx => this.act(cx, async () => { this.form = "repos"; await github.maybeAutoLink(this.projectId); })).text_color(colors.muted_foreground))
       .child(button("rules", "Rules", cx => this.openRules(cx)).text_color(colors.muted_foreground));
-    if (this.projects.length > 1) left.child(more);
-    const toolbar = h_flex().gap_2().px_5().pt_4().pb_2().items_center()
-      .child(left.flex_1())
+    if (this.projects.length > 1) toolbar.child(more);
+    toolbar.child(div().flex_1())
       .child(this.attentionButtons(cx))
-      .child(new Input(this.search).aria_label("Search tickets and threads").min_w("6rem").max_w("16rem").on_change((_, cx) => cx.notify()));
+      .child(new Input(this.search).aria_label("Search tickets and threads").min_w("8rem").max_w("16rem").on_change((_, cx) => cx.notify()));
     root.child(toolbar);
 
-    if (this.form) root.child(renderForm(this, cx).mx_5());
+    if (this.form) root.child(div().w_full().max_w("46rem").mx_auto().px_5().child(renderForm(this, cx)));
     const needle = this.search.value().trim();
     const loose = this.looseThreads();
     const ticketCount = STAGES.reduce((sum, stage) => sum + this.ticketsIn(stage).length, 0);

@@ -55,17 +55,20 @@ test("an agent add is proposed unless the board accepts additions", async () => 
   host.state.values.agentAutoApproveAdds = true;
 });
 
-test("Done needs its setting, and won't-do is refused while moves wait", async () => {
+test("Done needs its setting for an agent, and won't-do is refused while moves wait", async () => {
   const projectId = "prj_cli_done";
   threads.state.projects.push({ id: projectId, kind: "project", name: "Done", path: "/tmp/done", sort: 1 });
   const t = await store.createTicket({ projectId, title: "Done", kind: "task" });
   host.state.values.agentMoveToDone = false;
-  const refused = await cli({ kind: "cli", command: "move", argv: ["done", t.id], projectId, threadId: null });
+  const refused = await cli({ kind: "cli", command: "move", argv: ["done", t.id], projectId, threadId: "thr_agent" });
   assert.equal(refused.exitCode, 1);
   assert.match(refused.stderr, /Agents can move tickets to Done is off/);
+  const person = await cli({ kind: "cli", command: "move", argv: ["done", t.id], projectId, threadId: null });
+  assert.equal(person.exitCode, 0);
   host.state.values.agentMoveToDone = true;
   host.state.values.agentAutoApproveMoves = false;
-  const wont = await cli({ kind: "cli", command: "move", argv: ["done", t.id, "--wont-do"], projectId, threadId: "thr_agent" });
+  const other = await store.createTicket({ projectId, title: "Later", kind: "task" });
+  const wont = await cli({ kind: "cli", command: "move", argv: ["done", other.id, "--wont-do"], projectId, threadId: "thr_agent" });
   assert.equal(wont.exitCode, 1);
   assert.match(wont.stderr, /cannot be proposed/);
   host.state.values.agentAutoApproveMoves = true;
