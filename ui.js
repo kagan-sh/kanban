@@ -10,14 +10,27 @@ export const HANDING_OFF = new Set(["handing-off", "running"]);
 export const STATUS_WORD = { error: "Failed", unread: "New reply" };
 
 export function clickCx(a, b) { return b ?? a; }
+/** A click on a control stays with it, so a card that opens on click does not also open. */
+export function ownClick(callback) {
+  return (a, b) => {
+    const cx = clickCx(a, b);
+    cx.stop_propagation?.();
+    callback(cx);
+  };
+}
 export function button(id, label, callback) {
-  return new KgButton(id).label(label).ghost().compact().on_click((a, b) => callback(clickCx(a, b)));
+  return new KgButton(id).label(label).ghost().compact().on_click(ownClick(callback));
+}
+/** A small, muted, left-aligned action, as bb's text buttons inside a card. */
+export function link(id, label, callback, cx) {
+  // KgButton paints its own label colour, so `text_color` is kept for when kagan honours it; today the label stays foreground.
+  return button(id, label, callback).size("xsmall").self_start().text_color(cx.theme().colors.muted_foreground);
 }
 export function primary(id, label, callback) {
-  return new KgButton(id).label(label).primary().compact().on_click((a, b) => callback(clickCx(a, b)));
+  return new KgButton(id).label(label).primary().compact().on_click(ownClick(callback));
 }
 export function outline(id, label, callback) {
-  return new KgButton(id).label(label).outline().compact().on_click((a, b) => callback(clickCx(a, b)));
+  return new KgButton(id).label(label).outline().compact().on_click(ownClick(callback));
 }
 export function muted(message, cx) {
   return div().text_color(cx.theme().colors.muted_foreground).text_size(12).child(message);

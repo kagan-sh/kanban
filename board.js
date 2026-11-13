@@ -9,7 +9,7 @@ import * as github from "./github.js";
 import * as handoff from "./handoff.js";
 import { PERSONAS, STAGES, TITLES, canNest, dropOnColumn, handoffSources, moveWarning, needsYou, planMove, rankOrder, sortColumn, threadMatches, ticketMatches } from "./model.js";
 import { listPersonas } from "./personas.js";
-import { WatchedView, button, clickCx, dot, focusWhenMounted, muted, primary, select, tiny } from "./ui.js";
+import { WatchedView, button, clickCx, dot, focusWhenMounted, link, muted, primary, select, tiny } from "./ui.js";
 import { loadTicketExtras, refreshTicket, renderTicket } from "./ticket.js";
 import * as boardData from "./board-data.js";
 import { renderCard } from "./cards.js";
@@ -205,7 +205,8 @@ export class BoardPanel extends WatchedView {
     cx.notify();
     cx.spawn(async () => { focusWhenMounted(this.formFocus); });
   }
-  attentionButtons(cx) {
+  /** `loose: false` leaves out the loose-thread toggle, which belongs to the board, not to one ticket. */
+  attentionButtons(cx, { loose = true } = {}) {
     const row = h_flex().gap_2().items_center();
     const need = this.waitingTickets();
     const looseCount = this.data.loose.filter(t => t.projectId === this.projectId || this.shown.has(t.projectId)).length;
@@ -215,8 +216,8 @@ export class BoardPanel extends WatchedView {
         .child(dot(cx, cx.theme().colors.primary))
         .child(button("next-needs", `${need.length} ${word} you`, cx => this.jumpToNext(cx)).tooltip("Jump to the next one. Press N.")));
     }
-    if (looseCount || this.looseOpen) {
-      const label = looseCount === 1 ? "1 loose thread" : looseCount ? `${looseCount} loose threads` : "Loose threads";
+    if (loose && (looseCount || this.looseOpen)) {
+      const label = looseCount ? `${looseCount} loose` : "Loose threads";
       row.child(button("loose-toggle", label, cx => this.openLoose(cx)).tooltip("Threads that are not on a ticket"));
     }
     return row;
@@ -478,17 +479,17 @@ export class BoardPanel extends WatchedView {
           })
           .child(new Input(this.composer).aria_label("New ticket title")));
       } else {
-        body.child(button("new-ticket", "+  New ticket", cx => {
+        body.child(link("new-ticket", "+ New ticket", cx => {
           this.composerOpen = true;
           this.composer.set_value("");
           cx.notify();
           cx.spawn(async () => { focusWhenMounted(this.composerFocus); });
-        }).mx_1());
+        }, cx).mx_1());
       }
-      if (this.repos.length) body.child(button("import-issue", "Import issue", cx => this.act(cx, async () => {
+      if (this.repos.length) body.child(link("import-issue", "Import issue", cx => this.act(cx, async () => {
         this.form = "import";
         this.issues = await github.listIssues(this.projectId, { query: this.issueQuery.value(), ...this.issueFilters });
-      })).mx_1());
+      }), cx).mx_1());
     }
     column.child(new Scroll(this.columns[ix]).flex_1().min_h_0().child(body));
     if (stage === "done" && !needle && visible.length < tickets.length) {

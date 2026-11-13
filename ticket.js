@@ -2,7 +2,7 @@
 import { KINDS, USER_STORY_WARNING, kindWord, looksLikeUserStory, startProblem } from "./rules.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { DropdownMenu, KgButton, Markdown, Scroll, Tag, Textarea, ThreadStatus, WarningAlert } from "gpui-component";
+import { DropdownMenu, KgButton, Markdown, Scroll, Textarea, ThreadStatus, WarningAlert } from "gpui-component";
 import * as host from "kagan/host";
 import * as threads from "kagan/threads";
 import * as store from "./store.js";
@@ -10,7 +10,7 @@ import * as boardData from "./board-data.js";
 import * as github from "./github.js";
 import { briefingOf } from "./briefing.js";
 import { TITLES, canBlock, canNest, commentWhen, criteriaLine, descriptionPreview, threadStatusLine } from "./model.js";
-import { STATUS_WORD, button, chip, clickCx, focusWhenMounted, primary, tiny } from "./ui.js";
+import { STATUS_WORD, button, clickCx, focusWhenMounted, link, primary, tiny } from "./ui.js";
 import { ago, threadTree } from "./ui-model.js";
 import { renderHandoffState, renderPendingMove } from "./cards.js";
 import { renderForm } from "./forms.js";
@@ -71,17 +71,26 @@ export function dismissBriefing(view) {
   if (view.ticket) return store.kvSet(`seen:${view.ticket.id}`, String(Date.now()));
   }
 const SECTIONS = ["overview", "activity", "reviews"];
-const STAGE_VARIANT = { backlog: "secondary", "in-progress": "info", review: "warning", done: "success" };
 
 function sheet() {
-  return v_flex().w_full().max_w("46rem").mx_auto().px_6();
+  return v_flex().w_full().max_w("42rem").mx_auto().px_6();
 }
+/** bb's ticket is flat: sections sit on the page, split by a hairline, not boxed. */
 function surface(cx) {
   const colors = cx.theme().colors;
-  return v_flex().gap_3().p_4().rounded(cx.theme().radius.lg).bg(colors.surface).border_1().border_color(colors.border);
+  return v_flex().gap_2().pt_4().border_t_1().border_color(colors.border);
 }
-function heading(text) {
-  return div().font_weight(600).text_size(13).child(text);
+/** A section heading in bb's small muted type. */
+function heading(text, cx) {
+  return div().font_weight(500).text_size(12).text_color(cx.theme().colors.muted_foreground).child(text);
+}
+/** A row that opens a ticket or a thread: wrapping is cut with an ellipsis, and the row is left-aligned. */
+function rowLink(id, label, cx, onOpen) {
+  const colors = cx.theme().colors;
+  return h_flex().id(id).role("button").accessibility_label(label).flex_1().min_w_0().px_1().py(2).rounded(cx.theme().radius.sm)
+    .cursor_pointer().hover(el => el.bg(colors.muted))
+    .on_click((_event, cx) => onOpen(cx))
+    .child(div().flex_1().min_w_0().truncate().text_size(13).text_color(colors.foreground).child(label));
 }
 function beginEdit(view, cx) {
   view.section = "overview";
@@ -92,16 +101,17 @@ function beginEdit(view, cx) {
   if (view.formFocus && cx.spawn) cx.spawn(() => focusWhenMounted(view.formFocus));
 }
 function kindMenu(view, ticket) {
-  const menu = new DropdownMenu("ticket-kind", kindWord(ticket.kind));
+  const menu = new DropdownMenu("ticket-kind", ticket.kind ? kindWord(ticket.kind) : "No kind");
   menu.item("No kind", cx => view.act(cx, () => store.editTicket(ticket.id, { kind: null })));
   for (const kind of KINDS) menu.item(kindWord(kind), cx => view.act(cx, () => store.editTicket(ticket.id, { kind })));
   return menu;
 }
 function pickMenu(id, label, choices, onPick) {
   if (!choices.length) return null;
-  const menu = new DropdownMenu(id, label);
+  const menu = new DropdownMenu(id, `+ ${label}`);
   for (const choice of choices) menu.item(`#${choice.number} ${choice.title}`, cx => onPick(choice, cx));
-  return menu;
+  // Left-aligned at its own width, as bb's picker; a stretched trigger reads as a primary action.
+  return h_flex().child(menu);
 }
 function sectionLabel(view, ticket, name) {
   if (name === "activity" && ticket.comments.length) return `Activity · ${ticket.comments.length}`;
@@ -126,30 +136,33 @@ function sectionTabs(view, t) {
 export function renderTicket(view, cx) {
   const t = view.ticket;
   const colors = cx.theme().colors;
-  const chrome = sheet().pt_5().gap_4()
+  const chrome = sheet().pt_4().gap_3()
     .child(h_flex().gap_2().items_center()
-      .child(button("back-board", "All tickets", cx => { view.ticketId = null; view.form = null; view.pendingMove = null; cx.notify(); }))
+      .child(link("back-board", "← All tickets", cx => { view.ticketId = null; view.form = null; view.pendingMove = null; cx.notify(); }, cx))
       .child(div().flex_1())
-      .child(view.attentionButtons(cx))
-      .child(view.menu(t, cx, "Actions")))
-    .child(h_flex().gap_3().items_center()
-      .child(div().text_size(13).text_color(colors.muted_foreground).child(`#${t.number}`))
-      .child(new KgButton("edit-title").label(t.title).ghost().text_size(18).flex_1().min_w_0().tooltip("Edit title")
-        .on_click((a, b) => beginEdit(view, clickCx(a, b)))))
+      .child(view.attentionButtons(cx, { loose: false }))
+      .child(view.menu(t, cx, "···")))
+    // bb's title: the number muted, then the title, left-aligned and wrapping. Clicking it edits.
+    .child(h_flex().id("edit-title").role("button").accessibility_label(`Edit title of #${t.number}`).gap_2().items_baseline()
+      .cursor_pointer().on_click((_event, cx) => beginEdit(view, cx))
+      .child(div().flex_none().text_size(18).text_color(colors.muted_foreground).child(`#${t.number}`))
+      .child(div().flex_1().min_w_0().whitespace_normal().text_size(18).font_weight(500).text_color(colors.foreground).child(t.title)))
     .child(metaRow(view, cx, t))
-    .child(sectionTabs(view, t));
+    .child(v_flex().gap_2().child(sectionTabs(view, t)).child(div().h(1).w_full().bg(colors.border)));
   const page = view.section === "activity" ? renderComments(view, cx, t) : view.section === "reviews" ? renderReviews(view, cx, t) : renderOverview(view, cx, t);
-  return v_flex().size_full().min_h_0().child(chrome).child(new Scroll(view.scroll).flex_1().min_h_0().child(sheet().pt_4().pb_8().child(page)));
+  return v_flex().size_full().min_h_0().child(chrome).child(new Scroll(view.scroll).flex_1().min_h_0().child(sheet().pt_3().pb_8().child(page)));
 }
 function metaRow(view, cx, t) {
+  // bb's meta line: the kind picker, then one muted line for stage, criteria and a waiting move.
+  const facts = [TITLES[t.stage]];
+  if (t.stage === "done" && t.resolution === "wont-do") facts.push("won't do");
+  const ac = criteriaLine(t.description, t.kind);
+  if (ac) facts.push(ac);
+  if (t.pendingStage) facts.push(`Move to ${TITLES[t.pendingStage]} awaiting approval`);
   const row = h_flex().gap_2().items_center().flex_wrap()
     .child(div().flex_shrink_0().child(kindMenu(view, t)))
-    .child(new Tag().variant(STAGE_VARIANT[t.stage] ?? "secondary").size("small").outline().child(TITLES[t.stage]));
-  if (t.stage === "done" && t.resolution === "wont-do") row.child(new Tag().variant("secondary").size("small").outline().child("Won't do"));
-  const ac = criteriaLine(t.description, t.kind);
-  if (ac) row.child(chip(ac, cx));
-  if (t.pendingStage) row.child(tiny(`Move to ${TITLES[t.pendingStage]} awaiting approval`, cx));
-  if (!t.proposed && t.stage !== "done") row.child(primary("start-thread", "Start thread", cx => view.act(cx, () => view.prepare("start", t))).ml_auto().flex_shrink_0());
+    .child(div().flex_1().min_w_0().text_size(12).text_color(cx.theme().colors.muted_foreground).child(facts.join(" · ")));
+  if (!t.proposed && t.stage !== "done") row.child(primary("start-thread", "Start thread", cx => view.act(cx, () => view.prepare("start", t))).size("small").flex_shrink_0());
   return row;
 }
 function renderOverview(view, cx, t) {
@@ -177,20 +190,16 @@ function renderOverview(view, cx, t) {
   return body;
 }
 function renderDescription(view, cx, t) {
-  const card = surface(cx);
+  const block = v_flex().gap_2();
   if (!t.description) {
-    card.child(heading("Description"));
-    card.child(new KgButton("edit-ticket").label("Add a description").outline().self_start().on_click((a, b) => beginEdit(view, clickCx(a, b))));
-    if (t.kind === "story") card.child(tiny("Put the story here, including a ## Acceptance criteria checklist.", cx));
-    else if (t.kind === "bug") card.child(tiny("Fill in steps to reproduce, expected, and actual.", cx));
-    return card;
+    block.child(link("edit-ticket", "+ Add a description", cx => beginEdit(view, cx), cx));
+    if (t.kind === "story") block.child(tiny("Put the story here, including a ## Acceptance criteria checklist.", cx));
+    else if (t.kind === "bug") block.child(tiny("Fill in steps to reproduce, expected, and actual.", cx));
+    return block;
   }
-  card.child(h_flex().items_center()
-    .child(heading("Description"))
-    .child(div().flex_1())
-    .child(button("edit-ticket", "Edit", cx => beginEdit(view, cx))));
-  card.child(new Markdown(`description:${t.id}`, t.description));
-  return card;
+  block.child(new Markdown(`description:${t.id}`, t.description).text_size(14));
+  block.child(link("edit-ticket", "Edit description", cx => beginEdit(view, cx), cx));
+  return block;
 }
 export function renderBriefing(view, cx) {
   const colors = cx.theme().colors;
@@ -228,17 +237,18 @@ export function renderBriefing(view, cx) {
   }
 function linkedTicket(view, cx, ticket, openId, unlinkId, unlinkTip, unlink) {
   const stage = `${TITLES[ticket.stage] ?? ""}${ticket.resolution === "wont-do" ? " · won't do" : ""}`;
-  const row = h_flex().gap_2().items_center()
-    .child(button(openId, `#${ticket.number} ${ticket.title}`, cx => view.openTicket(ticket.id, cx)).flex_1().min_w_0())
-    .child(tiny(stage, cx));
-  if (unlinkId) row.child(button(unlinkId, "Remove", cx => view.act(cx, unlink)).tooltip(unlinkTip));
+  const row = h_flex().gap_2().items_center().group("linked")
+    .child(rowLink(openId, `#${ticket.number} ${ticket.title}`, cx, cx => view.openTicket(ticket.id, cx)))
+    .child(tiny(stage, cx).flex_none());
+  if (unlinkId) row.child(div().flex_none().opacity(0).group_hover("linked", el => el.opacity(1))
+    .child(link(unlinkId, "Remove", cx => view.act(cx, unlink), cx).tooltip(unlinkTip)));
   return row;
 }
-function relationGroup(section, cx, label, rows, menu) {
-  if (!rows.length && !menu) return;
-  if (rows.length) section.child(tiny(label, cx));
+/** One kind of link: its heading and rows when it has any. Its picker joins the shared row at the end. */
+function relationGroup(section, pickers, cx, label, rows, menu) {
+  if (rows.length) section.child(heading(label, cx));
   for (const row of rows) section.child(row);
-  if (menu) section.child(menu);
+  if (menu) pickers.push(menu);
 }
 export function renderRelationships(view, cx, t) {
   const parentChoices = t.parent ? [] : view.data.tickets.filter(p => canNest(view.data.tickets, t.id, p.id));
@@ -248,13 +258,14 @@ export function renderRelationships(view, cx, t) {
   const blockedBy = t.blockedBy ?? [];
   const blocks = t.blocks ?? [];
   if (!t.parent && !subs.length && !blockedBy.length && !blocks.length && !t.issue && !parentChoices.length && !childChoices.length && !blockerChoices.length) return null;
-  const section = surface(cx);
-  section.child(heading("Relationships"));
-  relationGroup(section, cx, "Parent", t.parent ? [linkedTicket(view, cx, t.parent, `parent-open:${t.parent.id}`, `unparent:${t.id}`, "Take it out of its parent", () => store.setParent(t.id, null))] : [], pickMenu("parent-ticket", "Set parent", parentChoices, (choice, cx) => view.act(cx, () => store.setParent(t.id, choice.id))));
-  relationGroup(section, cx, "Sub-tickets", subs.map(child => linkedTicket(view, cx, child, `sub:${child.id}`, `unsub:${child.id}`, "Take it out of this ticket", () => store.setParent(child.id, null))), pickMenu("add-sub", "Add sub-ticket", childChoices, (choice, cx) => view.act(cx, () => store.setParent(choice.id, t.id))));
-  relationGroup(section, cx, "Blocked by", blockedBy.map(blocker => linkedTicket(view, cx, blocker, `open-blocker:${blocker.id}`, `remove-blocker:${blocker.id}`, "Remove blocker", () => store.unblockTicket(t.id, blocker.id))), pickMenu("add-blocker", "Add blocker", blockerChoices, (choice, cx) => view.act(cx, () => store.blockTicket(t.id, choice.id))));
-  relationGroup(section, cx, "Blocks", blocks.map(blocked => linkedTicket(view, cx, blocked, `blocks:${blocked.id}`)), null);
-  if (t.issue) section.child(button("open-issue", `Copied from ${t.issue.repo}#${t.issue.number}`, cx => view.act(cx, () => host.openUrl(t.issue.url))));
+  const section = surface(cx).child(heading("Relationships", cx));
+  const pickers = [];
+  relationGroup(section, pickers, cx, "Parent", t.parent ? [linkedTicket(view, cx, t.parent, `parent-open:${t.parent.id}`, `unparent:${t.id}`, "Take it out of its parent", () => store.setParent(t.id, null))] : [], pickMenu("parent-ticket", "Set parent", parentChoices, (choice, cx) => view.act(cx, () => store.setParent(t.id, choice.id))));
+  relationGroup(section, pickers, cx, "Sub-tickets", subs.map(child => linkedTicket(view, cx, child, `sub:${child.id}`, `unsub:${child.id}`, "Take it out of this ticket", () => store.setParent(child.id, null))), pickMenu("add-sub", "Add sub-ticket", childChoices, (choice, cx) => view.act(cx, () => store.setParent(choice.id, t.id))));
+  relationGroup(section, pickers, cx, "Blocked by", blockedBy.map(blocker => linkedTicket(view, cx, blocker, `open-blocker:${blocker.id}`, `remove-blocker:${blocker.id}`, "Remove blocker", () => store.unblockTicket(t.id, blocker.id))), pickMenu("add-blocker", "Add blocker", blockerChoices, (choice, cx) => view.act(cx, () => store.blockTicket(t.id, choice.id))));
+  relationGroup(section, pickers, cx, "Blocks", blocks.map(blocked => linkedTicket(view, cx, blocked, `blocks:${blocked.id}`)), null);
+  if (pickers.length) section.child(h_flex().gap_2().flex_wrap().pt_1().children(pickers));
+  if (t.issue) section.child(link("open-issue", `Copied from ${t.issue.repo}#${t.issue.number}`, cx => view.act(cx, () => host.openUrl(t.issue.url)), cx));
   return section;
 }
 export function renderThreads(view, cx, t) {
@@ -262,7 +273,7 @@ export function renderThreads(view, cx, t) {
   const section = surface(cx);
   const quiet = threadStatusLine(t.threads);
   section.child(h_flex().gap_2().items_center()
-    .child(heading("Threads"))
+    .child(heading("Threads", cx))
     .child(div().flex_1())
     .when(Boolean(quiet), el => el.child(tiny(String(quiet).replace("Thread status · ", ""), cx)))
     .when(t.threads.length > 0 && !quiet, el => el.child(tiny(String(t.threads.length), cx))));
@@ -271,23 +282,23 @@ export function renderThreads(view, cx, t) {
   if (!t.threads.length) section.child(tiny(t.stage === "done" ? "Done archived the threads on this ticket." : "Nothing is working on this yet.", cx));
   for (const [thread, depth] of threadTree(t.threads)) {
     const project = view.projects.find(p => p.id === thread.projectId);
-    const link = (t.links ?? []).find(item => item.threadId === thread.id);
+    const joined = (t.links ?? []).find(item => item.threadId === thread.id);
     const menu = new DropdownMenu(`thread-menu:${thread.id}`, "···")
       .item(thread.pinned ? "Unpin" : "Pin", cx => view.act(cx, () => threads.setPinned(thread.id, !thread.pinned)))
       .item("Remove from ticket", cx => view.act(cx, () => store.detach(thread.id)))
       .item("Archive thread", cx => view.act(cx, async () => { await threads.archive(thread.id); store.touch(); }));
-    section.child(h_flex().gap_2().items_center().px_2().py_1().rounded(cx.theme().radius.md).bg(colors.background).pl(`${0.5 + depth * 0.75}rem`)
+    section.child(h_flex().gap_2().items_center().group("thread-row").pl(`${depth * 0.75}rem`)
       .child(new ThreadStatus(thread.id))
-      .child(button(`ticket-thread:${thread.id}`, `${thread.title}${thread.projectId !== t.projectId ? ` · ${project?.name ?? thread.projectId}` : ""}${link?.persona ? ` · ${link.persona}` : ""}`, cx => view.act(cx, () => host.openThread(thread.id))).flex_1().min_w_0())
-      .child(menu));
+      .child(rowLink(`ticket-thread:${thread.id}`, `${thread.title}${thread.projectId !== t.projectId ? ` · ${project?.name ?? thread.projectId}` : ""}${joined?.persona ? ` · ${joined.persona}` : ""}`, cx, cx => view.act(cx, () => host.openThread(thread.id))))
+      .child(div().flex_none().opacity(0).group_hover("thread-row", el => el.opacity(1)).child(menu)));
   }
   if (view.form === "attach") section.child(renderForm(view, cx));
   if (t.stage !== "done") {
     const loose = view.data.loose.filter(thread => thread.projectId === t.projectId);
     const actions = h_flex().gap_2().flex_wrap().items_center();
-    if (loose.length) actions.child(button("attach-thread", loose.length === 1 ? "Attach a thread" : `Attach a thread · ${loose.length}`, cx => { view.form = "attach"; cx.notify(); }));
-    if (t.handoffSources.length > 0) actions.child(button("handoff-thread", "Hand off…", cx => view.act(cx, () => view.prepare("handoff", t))));
-    if (t.handoffSources.length > 1) actions.child(button("consolidate-threads", "Consolidate…", cx => view.act(cx, () => view.prepare("consolidate", t))));
+    if (loose.length) actions.child(link("attach-thread", loose.length === 1 ? "Attach a thread" : `Attach a thread · ${loose.length}`, cx => { view.form = "attach"; cx.notify(); }, cx));
+    if (t.handoffSources.length > 0) actions.child(link("handoff-thread", "Hand off…", cx => view.act(cx, () => view.prepare("handoff", t)), cx));
+    if (t.handoffSources.length > 1) actions.child(link("consolidate-threads", "Consolidate…", cx => view.act(cx, () => view.prepare("consolidate", t)), cx));
     if (loose.length || t.handoffSources.length) section.child(actions);
   }
   return section;
@@ -295,7 +306,7 @@ export function renderThreads(view, cx, t) {
 function commentComposer(view, cx, t) {
   const draft = String(view.comment?.value?.() ?? "");
   const editing = Boolean(view.editCommentId);
-  const composer = surface(cx);
+  const composer = v_flex().gap_2();
   composer.child(new Textarea(view.comment).aria_label(editing ? "Edit comment" : "Add a comment"));
   composer.child(h_flex().gap_2().justify_end()
     .when(editing, el => el.child(button("cancel-comment", "Cancel", cx => { view.editCommentId = null; view.comment.set_value(""); cx.notify(); })))
@@ -304,7 +315,7 @@ function commentComposer(view, cx, t) {
       if (view.editCommentId) await store.editComment(view.editCommentId, body);
       else await store.addComment(t.id, { body });
       view.editCommentId = null; view.comment.set_value("");
-    })).disabled(view.busy || !draft.trim())));
+    })).size("small").disabled(view.busy || !draft.trim())));
   return composer;
 }
 export function renderComments(view, cx, t) {
@@ -339,24 +350,31 @@ export function renderComments(view, cx, t) {
   if (!view.editCommentId) section.child(commentComposer(view, cx, t));
   return section;
 }
+/** "Nov 13, 00:20": the runtime's toLocaleString ignores its options, so the parts are put together here. */
+export function stamp(ms) {
+  const at = new Date(Number(ms));
+  if (!Number.isFinite(at.getTime())) return "";
+  const pad = n => String(n).padStart(2, "0");
+  return `${commentWhen(at.getTime())}, ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
 export function renderReviews(view, cx, t) {
   const colors = cx.theme().colors;
-  const section = surface(cx).gap_4();
-  section.child(heading("Changes"));
+  const section = v_flex().gap_2();
+  section.child(heading("Changes", cx));
   if (!view.changes.length) section.child(tiny("No changed repo is readable for this ticket's threads.", cx));
   for (const change of view.changes) section.child(h_flex().gap_2().items_center()
     .child(button(`change:${change.threadId}`, change.title, cx => view.act(cx, () => host.openThread(change.threadId))).flex_1().min_w_0())
     .child(tiny(`+${change.added} −${change.removed}`, cx))
     .when(Boolean(change.base), el => el.child(tiny(`vs ${change.base}`, cx))));
-  section.child(heading("Repos"));
+  section.child(heading("Repos", cx).pt_3());
   if (view.form === "link") section.child(renderForm(view, cx));
   else section.child(h_flex().gap_2().items_center()
     .child(view.ticketRepos.length ? div().flex_1() : tiny("No repo is linked.", cx).flex_1())
-    .child(button("link-repos", view.ticketRepos.length ? "Link another" : "Link a repo", cx => view.act(cx, async () => { view.form = "link"; await github.maybeAutoLink(t.projectId); }))));
+    .child(link("link-repos", view.ticketRepos.length ? "+ Link another" : "+ Link a repo", cx => view.act(cx, async () => { view.form = "link"; await github.maybeAutoLink(t.projectId); }), cx)));
   for (const repo of view.ticketRepos) section.child(h_flex().gap_2().items_center()
     .child(tiny(repo, cx, colors.foreground).flex_1())
     .child(button(`unlink:${repo}`, "Unlink", cx => view.act(cx, () => store.unlinkRepo(t.projectId, repo)))));
-  section.child(heading("Pull requests"));
+  section.child(heading("Pull requests", cx).pt_3());
   if (view.pullsError) section.child(tiny(`Couldn't read pull requests: ${view.pullsError}`, cx, colors.destructive));
   else if (!view.pulls.length) section.child(tiny("No pull request for this ticket's branch.", cx));
   for (const pull of view.pulls) {
@@ -366,12 +384,12 @@ export function renderReviews(view, cx, t) {
       .child(tiny(`${pull.isDraft ? "Draft" : pull.state}${pull.mergedAt ? " · merged" : ""}`, cx))
       .child(tiny(checks, cx, pull.checks.failed ? colors.destructive : colors.muted_foreground)));
   }
-  section.child(heading("Stage history"));
+  section.child(heading("Stage history", cx).pt_3());
   for (const entry of t.stageHistory ?? []) {
     section.child(h_flex().gap_2().items_baseline()
       .child(tiny(TITLES[entry.stage] ?? entry.stage, cx, colors.foreground))
       .when(entry.resolution === "wont-do", el => el.child(tiny("won't do", cx)))
-      .child(tiny(new Date(entry.at).toLocaleString(), cx)));
+      .child(tiny(stamp(entry.at), cx)));
   }
   return section;
 }

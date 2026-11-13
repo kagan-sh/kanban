@@ -33,7 +33,7 @@ function fake(ticket) {
 test("the ticket page shows its title, description, threads, relationships and actions", () => {
   const t = detail();
   const page = renderTicket(fake(t), cx());
-  assert.ok(labels(page).includes("Ship it"));
+  assert.ok(texts(page).includes("Ship it"), "the title reads as text, left-aligned, not as a centered button label");
   assert.ok(ids(page).includes("edit-title"));
   assert.ok(ids(page).includes("tab-overview"));
   assert.match(texts(page).join(" "), /The description/);
@@ -80,7 +80,7 @@ test("an empty ticket hides relationship labels and keeps the kind control compa
   assert.equal(joined.includes("Parent"), false);
   assert.equal(joined.includes("Sub-tickets"), false);
   assert.equal(joined.includes("Blocked by"), false);
-  assert.ok(labels(page).includes("Add a description"));
+  assert.ok(labels(page).includes("+ Add a description"));
   assert.ok(labels(page).includes("Story"));
   assert.ok(labels(page).includes("Start thread"));
   const kind = walk(page).find(item => (item.ids ?? []).includes("ticket-kind"));
@@ -99,7 +99,7 @@ test("a peer ticket is offered as a parent, not an empty heading", () => {
   const page = renderTicket(v, cx());
   const parentMenu = walk(page).find(item => (item.ids ?? []).includes("parent-ticket"));
   const offered = (parentMenu.children ?? []).filter(kid => typeof kid?.label === "string").map(kid => kid.label);
-  assert.ok(labels(page).includes("Set parent"));
+  assert.ok(labels(page).includes("+ Set parent"));
   assert.ok(offered.includes("#2 Other"));
   assert.equal(offered.includes("#3 Child"), false);
   assert.ok(labels(page).includes("Attach a thread"));
@@ -113,4 +113,11 @@ test("a failed ticket reload keeps the ticket open and shows the error", async (
   await refreshTicket(v);
   assert.equal(v.ticketId, "tkt_missing");
   assert.match(v.error, /Couldn't read #tkt_missing/);
+});
+
+test("a stage history time reads as a short date and a 24-hour time", async () => {
+  const { stamp } = await import("./ticket.js");
+  const at = new Date(2026, 10, 13, 9, 5).getTime();
+  assert.match(stamp(at), /, 09:05$/);
+  assert.equal(stamp(Number.NaN), "");
 });

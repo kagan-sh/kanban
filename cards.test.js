@@ -21,8 +21,11 @@ function ticket(extra = {}) {
 test("a card shows its id, title, meta and start action", () => {
   const t = ticket({ kind: "story", description: "## Acceptance criteria\n- [x] A\n" });
   const card = cards.renderCard(view({ data: { tickets: [t], loose: [] } }), t, context, c, { md: 4 });
-  assert.ok(ids(card).includes("card:tkt_1"));
-  assert.ok(labels(card).includes("Ship it"));
+  assert.ok(ids(card).includes("ticket:tkt_1"), "the whole card opens the ticket");
+  assert.ok(texts(card).includes("Ship it"));
+  assert.ok(texts(card).includes("#1"));
+  assert.ok(texts(card).includes("story"), "the kind reads as bb writes it, in lower case");
+  assert.ok(!texts(card).some(text => /Can't leave Backlog/.test(text)), "the start gate is said on the ticket and at the move, not on the card");
   assert.match(labels(card).join(" "), /Start a thread/);
   assert.ok(ids(card).includes("start-card:tkt_1"));
 });
@@ -54,4 +57,9 @@ test("an expanded card lists its threads and a blocked card names what it waits 
   assert.ok(ids(card).includes("card-thread:thr_a"));
   assert.ok(ids(card).includes("blocked:tkt_1:tkt_2"));
   assert.match(labels(card).join(" "), /#2/);
+});
+
+test("a proposed card previews at most three lines of its description", () => {
+  assert.equal(cards.cardPreview("A\n\n\nB\nC\nD"), "A\nB\nC\n…");
+  assert.equal(cards.cardPreview("  "), null);
 });

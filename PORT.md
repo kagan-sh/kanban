@@ -28,6 +28,18 @@ Close (what differs):
 - The ticket is a center page, not a modal dialog, and the sidebar draws rows
   only (Kagan keeps New thread, Archived and the rail). Copy and hierarchy
   follow BB's card, column, header and detail layout.
+- Cards follow BB's card: the whole card opens the ticket, the title wraps
+  left-aligned, the menu shows on hover, the kind is lower case, and Start a
+  thread, New ticket and the thread toggle are small muted links. The `#N`
+  sits at the head of the meta row instead of inline before the title: a
+  native text run has one colour. The start gate is said on the ticket and at
+  the move, not on the card. `kg ui` clicks a card by its `ticket:<id>`; it
+  cannot open the hover menu, so that stays a pointer check.
+- The ticket page follows BB's dialog: a left-aligned `#N` and title that
+  edits on click, one muted line for stage and criteria, small Start thread,
+  tabs over a hairline, and flat sections split by hairlines instead of boxes.
+  Relationship pickers sit in one row of small `+` menus; Remove and a
+  thread's menu show on hover.
 - A handoff ask goes out once its source is idle (Kagan has no
   queue-if-active), waiting up to 20 minutes; then Retry asks again.
 - The handoff reply is read from `threads.output` after the `thread.waiting`
