@@ -4,7 +4,7 @@ import { element } from "./gpui-kit.js";
 export function colors() {
   return {
     background: "#000", foreground: "#fff", surface: "#111", border: "#222", muted_foreground: "#888",
-    primary: "#08f", ring: "#08f", destructive: "#f00", selection: "#223",
+    primary: "#08f", ring: "#08f", destructive: "#f00", selection: "#223", accent: "#333", secondary: "#2a2a2a", muted: "#1a1a1a",
   };
 }
 export function cx() {

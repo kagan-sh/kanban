@@ -6,6 +6,7 @@ import * as threads from "kagan/threads";
 import { cli } from "./cli.js";
 import * as store from "./store.js";
 import * as handoff from "./handoff.js";
+import * as busy from "./busy.js";
 export { BoardPanel, SidebarList } from "./views.js";
 
 /** A thread a ticket's thread started joins that ticket, unless it is already on another. */
@@ -28,6 +29,8 @@ export default class Plugin extends View {
       try {
         await store.ready();
         await handoff.expireHandoffs(true);
+        await busy.seed(threads.sidebar().threads.filter(t => t.status === "active"));
+        store.touch();
       } catch (error) {
         // ready() is retryable; each job will surface the real error until the cause clears.
         log("error", `Kanban database: ${error}`);
@@ -38,6 +41,7 @@ export default class Plugin extends View {
           reply(job.id, null);
           cx.spawn(async () => {
             try {
+              busy.record(job.type, job.threadId);
               if (job.type === "thread.deleted") await store.detach(job.threadId);
               if (job.type === "thread.waiting") { await handoff.collectHandoff(job.threadId); await handoff.expireHandoffs(); }
               if (job.type === "thread.idle") await handoff.expireHandoffs();

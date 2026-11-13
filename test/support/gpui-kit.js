@@ -27,3 +27,4 @@ export class View {
 
 export function div() { return element("div"); }
 export function px(value) { return Number(value); }
+export function svg(path) { const el = element("svg"); el._node.props.path = [path]; return el; }

@@ -50,3 +50,4 @@ export function InputState(name) {
   };
 }
 export function TextareaState() { return InputState("textarea"); }
+export class Spinner { constructor() { return chained({ kind: "spinner" }); } }

@@ -24,7 +24,7 @@ export function log(level, message) { state.logs.push({ level, message }); }
 export function settings() { return state.values; }
 export function context() { return { threadId: "thr_1", projectId: "prj_1", focused: true, theme: "dark" }; }
 export function onContextChanged() { return new Promise(() => {}); }
-export function threadOnScreen() { return false; }
+export function threadOnScreen(id) { return state.onScreen === id; }
 export async function openThread(id) { state.openedThreads.push(id); }
 export async function openPanel(id, props) { state.openedPanels.push({ id, props }); }
 export async function openUrl(url) { state.openedUrls.push(url); }

@@ -46,6 +46,6 @@
       { "name": "repos", "usage": "repos <list|link|unlink|issues|import> [repo] [number] [--project <id>] [--query <text>] [--label <label>] [--assignee <login>] [--author <login>] [--json]" }
     ]
   }],
-  "events": ["thread.created", "thread.started", "thread.waiting", "thread.idle", "thread.failed", "thread.archived", "thread.unarchived", "thread.deleted"],
+  "events": ["thread.created", "thread.started", "thread.waiting", "thread.idle", "thread.failed", "thread.exited", "thread.stopped", "thread.turn.started", "thread.turn.ended", "thread.archived", "thread.unarchived", "thread.deleted"],
   "skills": ["skills/kanban"]
 }
