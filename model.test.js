@@ -7,7 +7,6 @@ import {
   resolveHandoffOptions, threadStartupInput,
   moveScope, pendingScopeProblem, backlogRank, linkProblem, canBlock, sidebarRows,
 } from "./model.js";
-import { BUILTIN_PERSONAS } from "./personas-data.js";
 
 const story = "A change.\n\n## Acceptance criteria\n\n- [ ] It lands\n";
 
@@ -264,7 +263,3 @@ test("the sidebar lists a Backlog ticket only once a live thread works on it", (
   assert.deepEqual(ids.sort(), ["tkt_1", "tkt_3"]);
 });
 
-test("a built-in persona is available without a personas folder", () => {
-  assert.equal(typeof BUILTIN_PERSONAS["comment-editor"], "string");
-  assert.match(BUILTIN_PERSONAS["comment-editor"], /Constraint|constraint/);
-});

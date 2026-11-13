@@ -11,7 +11,10 @@
     "areas": ["threads", "database", "process"]
   },
   "settings": {
-    "personasDir": { "type": "folder", "title": "Personas folder (git pull on open)" },
+    "personasDir": { "type": "folder", "title": "Personas folder: one .md file per persona (git pull on open)" },
+    "personaBacklog": { "type": "string", "title": "Default persona for a thread started in Backlog" },
+    "personaInProgress": { "type": "string", "title": "Default persona for a thread started in In progress" },
+    "personaReview": { "type": "string", "title": "Default persona for a thread started in Review" },
     "defaultProgram": {
       "type": "select",
       "title": "Program for new threads",

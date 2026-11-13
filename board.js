@@ -7,8 +7,8 @@ import * as host from "kagan/host";
 import * as store from "./store.js";
 import * as github from "./github.js";
 import * as handoff from "./handoff.js";
-import { PERSONAS, STAGES, TITLES, canNest, dropOnColumn, handoffSources, moveWarning, needsYou, planMove, rankOrder, sortColumn, threadMatches, ticketMatches } from "./model.js";
-import { listPersonas } from "./personas.js";
+import { STAGES, TITLES, canNest, dropOnColumn, handoffSources, moveWarning, needsYou, planMove, rankOrder, sortColumn, threadMatches, ticketMatches } from "./model.js";
+import { listPersonas, stagePersona } from "./personas.js";
 import { WatchedView, button, clickCx, dot, focusWhenMounted, link, muted, primary, select, tiny } from "./ui.js";
 import { loadTicketExtras, refreshTicket, renderTicket } from "./ticket.js";
 import * as boardData from "./board-data.js";
@@ -130,7 +130,7 @@ export class BoardPanel extends WatchedView {
   async prepare(form, ticket) {
     this.form = form;
     this.personas = await listPersonas();
-    this.persona = this.personas.includes(PERSONAS[ticket?.stage ?? "backlog"]) ? PERSONAS[ticket?.stage ?? "backlog"] : "";
+    this.persona = stagePersona(ticket?.stage ?? "backlog", this.personas);
     this.prompt.set_value("");
     const sources = ticket ? handoffSources(ticket) : [];
     this.sourceIds = new Set(sources.map(t => t.id));
@@ -345,7 +345,7 @@ export class BoardPanel extends WatchedView {
             window.close_dialog();
             this.pendingMove = { id: ticket.id, stage: plan.stage };
             this.ticketId = ticket.id;
-            this.act(cx, async () => { await this.prepare("handoff", ticket); this.persona = this.personas.includes(PERSONAS[plan.stage]) ? PERSONAS[plan.stage] : ""; });
+            this.act(cx, async () => { await this.prepare("handoff", ticket); this.persona = stagePersona(plan.stage, this.personas); });
           }))
           .child(button(`just-move:${ticket.id}`, "Move without starting a thread", cx => { window.close_dialog(); this.finishMove(cx, ticket.id, plan.stage, "done"); }))));
       return;

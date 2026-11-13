@@ -10,30 +10,42 @@ register(new URL("./test/support/kagan-loader.mjs", import.meta.url).href);
 const personas = await import("./personas.js");
 const host = await import("./test/support/kagan-host.js");
 
-test("without a folder the built-in personas are still available", async () => {
+test("without a personas folder there are no personas: the plugin ships none", async () => {
   host.state.values.personasDir = undefined;
-  assert.deepEqual(await personas.listPersonas(), ["comment-editor"]);
-  const text = await personas.personaBody("comment-editor");
-  assert.match(text, /Comment editor/);
-  await assert.rejects(() => personas.personaBody("nobody"), /Choose a persona/);
+  assert.deepEqual(await personas.listPersonas(), []);
+  await assert.rejects(() => personas.personaBody("implementer"), /personas folder in Settings/);
   assert.equal(await personas.personaBody(null), null);
 });
 
-test("a folder adds persona files and a file of the same name wins", async () => {
+test("the personas are the folder's .md files, without README or bad names", async () => {
   const dir = await mkdtemp(join(tmpdir(), "kanban-personas-"));
   try {
     await writeFile(join(dir, "implementer.md"), "# Implementer\nBuild it.");
-    await writeFile(join(dir, "comment-editor.md"), "# Custom editor");
+    await writeFile(join(dir, "reviewer.md"), "# Reviewer");
     await writeFile(join(dir, "README.md"), "not a persona");
     await writeFile(join(dir, "bad name.md"), "not a persona");
     host.state.values.personasDir = dir;
-    const names = await personas.listPersonas();
-    assert.deepEqual(names, ["comment-editor", "implementer"]);
+    assert.deepEqual(await personas.listPersonas(), ["implementer", "reviewer"]);
     assert.match(await personas.personaBody("implementer"), /Build it/);
-    assert.match(await personas.personaBody("comment-editor"), /Custom editor/);
-    await assert.rejects(() => personas.personaBody("../escape"), /Choose a persona/);
+    await assert.rejects(() => personas.personaBody("missing"), /personas folder in Settings/);
+    await assert.rejects(() => personas.personaBody("../escape"), /personas folder in Settings/);
   } finally {
     await rm(dir, { recursive: true, force: true });
     host.state.values.personasDir = undefined;
+  }
+});
+
+test("each stage's default persona comes from Settings, and only when the folder has it", () => {
+  const names = ["implementer", "intake"];
+  host.state.values.personaBacklog = " intake ";
+  host.state.values.personaInProgress = "gone";
+  try {
+    assert.equal(personas.stagePersona("backlog", names), "intake");
+    assert.equal(personas.stagePersona("in-progress", names), "", "a name the folder lacks is not preselected");
+    assert.equal(personas.stagePersona("review", names), "", "an unset stage preselects nothing");
+    assert.equal(personas.stagePersona("done", names), "");
+  } finally {
+    host.state.values.personaBacklog = undefined;
+    host.state.values.personaInProgress = undefined;
   }
 });

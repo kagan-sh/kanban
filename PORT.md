@@ -19,7 +19,8 @@ Moved (one plugin, plain JavaScript):
   required) through `threads.send`, read the reply's scrollback, save it as a
   comment, start the successor from it, and archive the source. Consolidate
   collects several. Retry, Start without handoff, and an hour-long timeout.
-- Personas (including the built-in comment-editor), the built-in skill, the
+- Personas from the Personas folder setting (none ship with the plugin; each
+  stage's default persona is a setting too), the built-in skill, the
   CLI (list/move/ticket/rules/repos), and the replaceable sidebar list.
 - GitHub: remote auto-link, linked repos, issue search and one-time import,
   and a per-ticket PR pulse with check counts, read through `gh`.

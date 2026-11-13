@@ -17,7 +17,7 @@ kg plugin check .
 kg plugin install .
 ```
 
-Approve the powers screen. The plugin reads threads, stores tickets in its own SQLite file under `~/.kagan/plugins/dev.kagan.kanban/`, and can run `gh` and `git` with your normal credentials (issue import is copy-only; `gh` itself is a full CLI). Set **Program for new threads** and optionally **Personas folder** (opening the board may `git pull --ff-only` that folder).
+Approve the powers screen. The plugin reads threads, stores tickets in its own SQLite file under `~/.kagan/plugins/dev.kagan.kanban/`, and can run `gh` and `git` with your normal credentials (issue import is copy-only; `gh` itself is a full CLI). Set **Program for new threads** and optionally **Personas folder**: a folder of persona `.md` files, one per persona, such as a clone of your personas repo (opening the board may `git pull --ff-only` that folder). The plugin ships no personas. **Default persona** for Backlog, In progress and Review preselects one of that folder's names when you start or hand off a thread in that stage; leave it empty to pick each time.
 
 **First success:** click **Board** on the rail (or Command-Shift-K) → **New ticket** → type a title → Enter. The ticket lands at the bottom of Backlog.
 
