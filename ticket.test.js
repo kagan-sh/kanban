@@ -121,3 +121,11 @@ test("a stage history time reads as a short date and a 24-hour time", async () =
   assert.match(stamp(at), /, 09:05$/);
   assert.equal(stamp(Number.NaN), "");
 });
+
+test("Consolidate is offered as soon as one thread is on the ticket, as in bb, and hidden while a handoff runs", () => {
+  const one = renderTicket(fake(detail()), cx());
+  assert.ok(ids(one).includes("consolidate-threads"));
+  assert.ok(ids(one).includes("handoff-thread"));
+  const running = renderTicket(fake(detail({ handoff: { status: "handing-off", consolidate: false } })), cx());
+  assert.equal(ids(running).includes("consolidate-threads"), false);
+});

@@ -10,7 +10,7 @@ import * as boardData from "./board-data.js";
 import * as github from "./github.js";
 import { briefingOf } from "./briefing.js";
 import { TITLES, canBlock, canNest, commentWhen, criteriaLine, descriptionPreview, threadStatusLine } from "./model.js";
-import { STATUS_WORD, button, clickCx, focusWhenMounted, link, primary, tiny } from "./ui.js";
+import { HANDING_OFF, STATUS_WORD, button, clickCx, focusWhenMounted, link, primary, tiny } from "./ui.js";
 import { ago, threadTree } from "./ui-model.js";
 import { renderHandoffState, renderPendingMove } from "./cards.js";
 import { renderForm } from "./forms.js";
@@ -297,8 +297,12 @@ export function renderThreads(view, cx, t) {
     const loose = view.data.loose.filter(thread => thread.projectId === t.projectId);
     const actions = h_flex().gap_2().flex_wrap().items_center();
     if (loose.length) actions.child(link("attach-thread", loose.length === 1 ? "Attach a thread" : `Attach a thread · ${loose.length}`, cx => { view.form = "attach"; cx.notify(); }, cx));
-    if (t.handoffSources.length > 0) actions.child(link("handoff-thread", "Hand off…", cx => view.act(cx, () => view.prepare("handoff", t)), cx));
-    if (t.handoffSources.length > 1) actions.child(link("consolidate-threads", "Consolidate…", cx => view.act(cx, () => view.prepare("consolidate", t)), cx));
+    // As in bb: any thread on the ticket can be handed off or consolidated, unless a handoff is already under way.
+    const idle = !t.proposed && !(t.handoff && HANDING_OFF.has(String(t.handoff.status)));
+    if (idle && t.handoffSources.length > 0) {
+      actions.child(link("handoff-thread", "Hand off…", cx => view.act(cx, () => view.prepare("handoff", t)), cx));
+      actions.child(link("consolidate-threads", "Consolidate…", cx => view.act(cx, () => view.prepare("consolidate", t)), cx));
+    }
     if (loose.length || t.handoffSources.length) section.child(actions);
   }
   return section;

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register(new URL("./test/support/kagan-loader.mjs", import.meta.url).href);
-const { SidebarList, withOtherThreads } = await import("./sidebar.js");
+const { SidebarList, withOtherThreads, stageGlyph } = await import("./sidebar.js");
 const { agentMark, programName } = await import("./agents.js");
 const busy = await import("./busy.js");
 const { colors, cx, ids, labels, texts, walk } = await import("./test/support/view.js");
@@ -31,19 +31,18 @@ test("a ticket row shows its number, title, glyph and next-stage action", () => 
   assert.ok(texts(line).includes("Ship it"), "the title is the row's text, cut with an ellipsis, not a button label");
   assert.equal(labels(line).includes("#1 Ship it"), false);
   assert.ok(ids(line).includes("row:tkt_1"));
-  assert.ok(ids(line).includes("move-ticket:tkt_1:in-progress"));
+  assert.ok(ids(line).includes("row-menu:tkt_1"), "one ··· instead of text buttons");
+  assert.equal(labels(line).some(label => /In progress|Start|Ticket/.test(label)), false);
 });
 
-test("a proposed row says Proposed, and a loose thread row offers New ticket", () => {
+test("a proposed row says Proposed, and a loose thread row has only its ··· menu", () => {
   const ticket = { id: "tkt_2", number: 2, title: "Maybe", stage: "backlog", projectId: "prj_1", proposed: true };
   const view = instance();
   const proposed = SidebarList.prototype.itemRow.call(view, { kind: "ticket", id: "tkt_2", ticket, threads: [], thread: null, depth: 0 }, null, colorsValue, cx());
   assert.match(texts(proposed).join(" "), /Proposed/);
   const thread = { id: "thr_a", projectId: "prj_1", title: "Loose", status: "idle" };
   const loose = SidebarList.prototype.itemRow.call(view, { kind: "thread", id: "thr_a", ticket: null, thread, depth: 0 }, null, colorsValue, cx());
-  assert.ok(ids(loose).includes("newtkt:thr_a"));
-  assert.ok(labels(loose).includes("New ticket"));
-  assert.ok(ids(loose).includes("archive:thr_a"));
+  assert.deepEqual(labels(loose), ["···"]);
 });
 
 test("keyboard navigation selects, opens and expands rows", () => {
@@ -82,7 +81,7 @@ test("a project's loose threads sit under one Other threads heading after its ti
     { kind: "ticket", id: "k1", depth: 0 },
     { kind: "thread", id: "t2", depth: 0 },
   ];
-  assert.deepEqual(withOtherThreads(rows, new Set()).map(r => `${r.id}:${r.depth}`), ["p:undefined", "k1:0", "other:p:0", "t1:1", "t2:1"]);
+  assert.deepEqual(withOtherThreads(rows, new Set()).map(r => `${r.id}:${r.depth}`), ["p:undefined", "k1:0", "other:p:0", "t1:0", "t2:0"], "loose threads line up with tickets, as in bb");
   assert.equal(withOtherThreads(rows, new Set()).find(r => r.kind === "other").count, 2);
   assert.deepEqual(withOtherThreads(rows, new Set(["other:p"])).map(r => r.id), ["p", "k1", "other:p"]);
 });
@@ -138,4 +137,30 @@ test("the row of the thread on screen is lit, and a folded ticket lights for its
   } finally {
     host.state.onScreen = undefined;
   }
+});
+
+test("stage circles are drawn shapes of one size, told apart by fill", () => {
+  const shape = stage => walk(stageGlyph(stage, colorsValue));
+  for (const stage of ["backlog", "in-progress", "review", "done"]) {
+    assert.deepEqual([shape(stage)[0].props.w, shape(stage)[0].props.h], [[12], [12]], `${stage} is 12px`);
+  }
+  assert.ok("border_dashed" in shape("backlog")[0].props, "Backlog is a dashed ring");
+  assert.ok(shape("in-progress").some(n => "rounded_tl" in n.props), "In progress fills its left half");
+  assert.equal(shape("review").length, 2, "Review is a ring around a dot");
+  assert.ok("bg" in shape("done")[0].props, "Done is a full disc");
+});
+
+test("the ··· menu offers Pin and Archive from kagan's thread menu, and Open ticket on board for a ticket", () => {
+  const view = instance();
+  const thread = { id: "thr_a", projectId: "prj_1", title: "Loose", status: "idle", pinned: false };
+  const loose = view.rowActions({ kind: "thread", id: "thr_a", thread, ticket: null });
+  assert.deepEqual(loose.map(a => a.label), ["Pin", "Archive"]);
+  const ticket = { id: "tkt_1", number: 1, title: "T", stage: "in-progress", projectId: "prj_1" };
+  const two = [thread, { ...thread, id: "thr_b", pinned: true }];
+  const many = view.rowActions({ kind: "ticket", id: "tkt_1", ticket, threads: two, thread: two[0] });
+  assert.deepEqual(many.map(a => a.label), ["Unpin", "Open ticket on board"], "a ticket archives only with one thread");
+  const bare = view.rowActions({ kind: "ticket", id: "tkt_2", ticket, threads: [], thread: null });
+  assert.deepEqual(bare.map(a => a.label), ["Open ticket on board"]);
+  const child = view.rowActions({ kind: "ticket-thread", id: "child:thr_a", ticket, thread });
+  assert.deepEqual(child.map(a => a.label), ["Pin", "Archive", "Open ticket on board"]);
 });

@@ -299,9 +299,13 @@ export class BoardPanel extends WatchedView {
     }
     return this.data.loose.find(thread => thread.id === id) ?? null;
   }
+  /** A refused move says why where the person is looking, as bb's toast does, not in a line at the top of the board. */
+  refuse(reason) {
+    host.toast(reason).catch(error => host.log("warn", `Couldn't show a toast: ${error}`));
+  }
   applyDrop(decision, cx) {
     if (!decision || decision.action === "ignore") return;
-    if (decision.action === "refuse") { this.error = decision.reason; cx.notify(); return; }
+    if (decision.action === "refuse") return this.refuse(decision.reason);
     if (decision.action === "move") {
       const ticket = this.data.tickets.find(item => item.id === decision.id);
       if (ticket) this.move(ticket, decision.stage, cx);
@@ -323,7 +327,7 @@ export class BoardPanel extends WatchedView {
   move(ticket, stage, cx, resolution = "done") {
     const plan = planMove(ticket, stage, resolution);
     if (plan.action === "ignore") return;
-    if (plan.action === "refuse") { this.error = plan.reason; cx.notify(); return; }
+    if (plan.action === "refuse") return this.refuse(plan.reason);
     if (plan.action === "confirm-done") {
       const wont = plan.resolution === "wont-do";
       window.open_dialog(() => v_flex().gap_3()

@@ -76,3 +76,14 @@ test("a move request waits until its ticket is loaded", () => {
   assert.deepEqual(moves, []);
   assert.deepEqual(instance.requestedMove, { stage: "review", ticketId: "tkt_1" });
 });
+
+test("a refused drop says why in a toast, where the person is looking", async () => {
+  const host = await import("./test/support/kagan-host.js");
+  host.state.toasts.length = 0;
+  const board = Object.create(BoardPanel.prototype);
+  board.error = "";
+  board.applyDrop({ action: "refuse", reason: "Can't start #1: a story needs a ## Acceptance criteria checklist." }, cx());
+  await Promise.resolve();
+  assert.deepEqual(host.state.toasts, ["Can't start #1: a story needs a ## Acceptance criteria checklist."]);
+  assert.equal(board.error, "", "the board's top line stays for load errors");
+});

@@ -4,7 +4,6 @@ import { acceptanceCriteria, isGated, startProblem } from "./rules.js";
 
 export const STAGES = ["backlog", "in-progress", "review", "done"];
 export const TITLES = { backlog: "Backlog", "in-progress": "In progress", review: "Review", done: "Done" };
-export const GLYPHS = { backlog: "◌", "in-progress": "◐", review: "⊙", done: "●" };
 export const NEXT = { backlog: "in-progress", "in-progress": "review", review: "done", done: null };
 
 export function stage(value) {
